@@ -3,8 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Event Ticketing System - Cloud Sync</title>
-    <!-- Firebase SDKs are imported as modules in the script below -->
+    <title>Event Ticketing System - Admin Only</title>
     
     <style>
         :root {
@@ -124,6 +123,10 @@
             color: var(--danger-color);
             margin-top: 15px;
             display: none;
+            padding: 10px;
+            background: rgba(247, 37, 133, 0.1);
+            border-radius: 5px;
+            border: 1px solid var(--danger-color);
         }
 
         /* --- Header & Nav --- */
@@ -756,14 +759,14 @@
     <!-- Login Overlay -->
     <div id="login-overlay">
         <div class="login-box">
-            <h2>Team Login</h2>
-            <p>Log in to access your event dashboard. Use the same account on all devices to sync data.</p>
+            <h2>Authorized Login</h2>
+            <p>Log in with your administrator credentials to access the dashboard.</p>
             <input type="email" id="emailInput" placeholder="Email Address">
             <input type="password" id="passwordInput" placeholder="Password">
-            <button id="loginButton">Log In / Sign Up</button>
+            <button id="loginButton">Log In</button>
             <p id="auth-error"></p>
             <p style="margin-top: 15px; font-size: 0.8rem; color: #666;">
-                *If you are new, this will create an account for you automatically.
+                *Public registration is disabled. Contact admin for access.
             </p>
         </div>
     </div>
@@ -909,11 +912,11 @@
     
     <script type="module">
         import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
-        import { getAuth, signInWithEmailAndPassword, createUserWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+        import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
         import { getFirestore, collection, doc, setDoc, addDoc, onSnapshot, query, deleteDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // ==========================================
-        // FIREBASE CONFIGURATION (Auto-filled)
+        // FIREBASE CONFIGURATION
         // ==========================================
         const firebaseConfig = {
           apiKey: "AIzaSyBYzmAZQ8sKHjXgVh_t-vbtYN_gRzBstw8",
@@ -969,12 +972,12 @@
             }
         });
 
-        // 2. Login/Register Handler
+        // 2. Login Handler (STRICT MODE - NO REGISTRATION)
         loginButton.addEventListener('click', async () => {
             const email = emailInput.value;
             const password = passwordInput.value;
             authError.style.display = 'none';
-            loginButton.textContent = "Processing...";
+            loginButton.textContent = "Verifying...";
             loginButton.disabled = true;
 
             if (!email || !password) {
@@ -983,22 +986,18 @@
             }
 
             try {
-                // Try to sign in first
+                // STRICT MODE: Only sign in. If user doesn't exist, it fails.
                 await signInWithEmailAndPassword(auth, email, password);
+                
             } catch (error) {
+                console.error("Login failed:", error);
                 if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-credential') {
-                    // If user not found, try to register
-                    try {
-                         await createUserWithEmailAndPassword(auth, email, password);
-                         // Registration auto-logs in, so onAuthStateChanged will trigger
-                    } catch (regError) {
-                        showError(getReadableError(regError));
-                    }
+                    showError("Access Denied: Invalid credentials or account does not exist.");
                 } else {
                     showError(getReadableError(error));
                 }
             } finally {
-                 loginButton.textContent = "Log In / Sign Up";
+                 loginButton.textContent = "Log In";
                  loginButton.disabled = false;
             }
         });
@@ -1010,7 +1009,7 @@
         function showError(msg) {
             authError.textContent = msg;
             authError.style.display = 'block';
-            loginButton.textContent = "Log In / Sign Up";
+            loginButton.textContent = "Log In";
             loginButton.disabled = false;
         }
 
@@ -1331,5 +1330,3 @@
     </script>
 </body>
 </html>
-
-
