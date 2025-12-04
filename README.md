@@ -5,7 +5,7 @@
 ## Table of Contents
 1. [📖 Overview](#-overview)
 2. [✨ Key Features](#-key-features)
-3. [🛠️ Installation & Setup](#-installation-&-setup)
+3. [🛠️ Installation & Setup](#-setup)
 4. [🚀 How to Use](#-how-to-use)
 5. [📂 Project Structure](#-project-structure)
 6. [🛡️ Security](#-security)
@@ -46,7 +46,7 @@ This is a serverless, single-file web application designed for exclusive events.
 
 ---
 
-## 🛠️ Installation & Setup
+## 🛠️ Setup
 
 ### Prerequisites
 * A Google/Firebase Account.
