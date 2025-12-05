@@ -51,7 +51,8 @@ createStars();
 
 // --- SEARCH & FILTER STATE ---
 let searchTerm = '';
-let currentFilter = 'all';
+let currentFilter = 'all'; // Status filter
+let currentGenderFilter = 'all'; // Gender filter
 let currentSort = 'newest';
 let currentFilteredTickets = []; // Used for export and select all
 
@@ -311,10 +312,16 @@ document.querySelectorAll('.dropdown-item').forEach(item => {
         e.stopPropagation();
         const type = item.dataset.type;
         const val = item.dataset.val;
+        
+        // Remove 'selected' from all items of THIS type
         document.querySelectorAll(`.dropdown-item[data-type="${type}"]`).forEach(el => el.classList.remove('selected'));
+        // Add 'selected' to clicked item
         item.classList.add('selected');
+
         if(type === 'filter') currentFilter = val;
+        if(type === 'filter-gender') currentGenderFilter = val;
         if(type === 'sort') currentSort = val;
+
         renderBookedTickets();
         filterDropdown.classList.remove('show');
     });
@@ -529,8 +536,13 @@ function renderBookedTickets() {
         const matchesSearch = ticket.name.toLowerCase().includes(searchTerm) || ticket.phone.includes(searchTerm);
         if (!matchesSearch) return false;
 
-        if (currentFilter === 'all') return true;
-        return ticket.status === currentFilter;
+        // Check Status
+        if (currentFilter !== 'all' && ticket.status !== currentFilter) return false;
+        
+        // Check Gender
+        if (currentGenderFilter !== 'all' && ticket.gender !== currentGenderFilter) return false;
+
+        return true;
     });
 
     // 2. SORT
@@ -541,6 +553,7 @@ function renderBookedTickets() {
         if (currentSort === 'name-desc') return b.name.localeCompare(a.name);
         if (currentSort === 'age-asc') return Number(a.age) - Number(b.age);
         if (currentSort === 'age-desc') return Number(b.age) - Number(a.age);
+        if (currentSort === 'gender') return a.gender.localeCompare(b.gender);
         return 0;
     });
 
