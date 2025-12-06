@@ -89,15 +89,23 @@
         <div class="login-box">
             <h2>Authorized Access</h2>
             <p>Please verify your identity to continue.</p>
-            <input type="email" id="emailInput" class="premium-input" placeholder="Administrator Email">
+            <!-- Added autocomplete="username" for accessibility -->
+            <input type="email" id="emailInput" class="premium-input" placeholder="Administrator Email" name="email" autocomplete="username">
             
             <!-- Password Field with Toggle Icon -->
             <div class="password-wrapper">
-                <input type="password" id="passwordInput" class="premium-input" placeholder="Password">
+                <!-- Added autocomplete="current-password" for biometric manager -->
+                <input type="password" id="passwordInput" class="premium-input" placeholder="Password" name="password" autocomplete="current-password">
                 <i class="fa-regular fa-eye password-toggle-icon" id="togglePassword"></i>
             </div>
 
             <button id="loginButton" class="premium-btn">Authenticate</button>
+            
+            <!-- Biometric / Passkey Button -->
+            <button id="biometricBtn" class="premium-btn" style="background: transparent; border: 1px solid var(--border-subtle); color: var(--text-muted); margin-top: 10px; font-weight: 400;">
+                <i class="fa-solid fa-fingerprint" style="margin-right: 8px;"></i> Login with Biometrics
+            </button>
+
             <div id="auth-error" style="color: #ef4444; font-size: 0.9rem; margin-top: 15px; display: none;"></div>
         </div>
     </div>
