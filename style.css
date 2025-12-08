@@ -1041,13 +1041,13 @@ tr:hover td {
     position: fixed;
     right: 0;
     /* REVERTED: Back to top:50% as requested */
-    top: 60%; 
+    top: 75%; 
     bottom: auto; 
     transform: translateY(-50%) translateX(100%); /* Centered Vertically, Hidden horizontally */
     width: 300px;
     /* Auto height so it grows/shrinks with content, but capped at 80vh to prevent overflow */
     height: auto; 
-    max-height: 80vh; 
+    max-height: 45vh; 
     background: rgba(0, 0, 0, 0.9);
     border: 3px solid rgba(255, 255, 255, 0.2); /* Thicker border */
     border-right: none;
