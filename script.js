@@ -228,13 +228,16 @@ cancelExportBtn.addEventListener('click', () => {
 confirmExportBtn.addEventListener('click', () => {
     const filename = exportFileName.value || 'guest_list';
     const format = exportFormat.value;
+    
     let listToExport = [];
+    
     if (selectedTicketIds.size > 0) {
-        listToExport = bookedTickets.filter(t => selectedTicketIds.has(t.id));
+        listToExport = currentFilteredTickets.filter(t => selectedTicketIds.has(t.id));
     } else {
         exportModal.style.display = 'none';
         return alert("No data selected to export.");
     }
+    
     switch(format) {
         case 'csv': exportCSV(listToExport, filename); break;
         case 'xlsx': exportXLSX(listToExport, filename); break;
@@ -249,18 +252,19 @@ confirmExportBtn.addEventListener('click', () => {
 
 function exportCSV(data, filename) {
     let csvContent = "data:text/csv;charset=utf-8,";
-    csvContent += "Guest Name,Age,Gender,Phone,Status,Ticket ID,Entry Time\n";
-    data.forEach(row => {
+    csvContent += "S.No.,Guest Name,Age,Gender,Phone,Status,Ticket ID,Entry Time\n";
+    data.forEach((row, index) => {
         const scannedTime = row.scannedAt ? new Date(row.scannedAt).toLocaleTimeString() : "";
         const cleanName = row.name.replace(/,/g, ""); 
-        const rowStr = `${cleanName},${row.age},${row.gender},${row.phone},${row.status},${row.id},${scannedTime}`;
+        const rowStr = `${index + 1},${cleanName},${row.age},${row.gender},${row.phone},${row.status},${row.id},${scannedTime}`;
         csvContent += rowStr + "\n";
     });
     downloadFile(encodeURI(csvContent), `${filename}.csv`);
 }
 
 function exportXLSX(data, filename) {
-    const worksheetData = data.map(row => ({
+    const worksheetData = data.map((row, index) => ({
+        "S.No.": index + 1,
         "Guest Name": row.name,
         "Age": row.age,
         "Gender": row.gender,
@@ -281,10 +285,11 @@ function exportPDF(data, filename) {
     doc.text("Event Guest List", 14, 20);
     doc.setFontSize(10);
     doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 26);
-    const tableColumn = ["Name", "Age", "Gender", "Phone", "Status", "Entry Time"];
+    const tableColumn = ["#", "Name", "Age", "Gender", "Phone", "Status", "Entry Time"];
     const tableRows = [];
-    data.forEach(row => {
+    data.forEach((row, index) => {
         tableRows.push([
+            index + 1,
             row.name,
             row.age,
             row.gender,
@@ -314,7 +319,11 @@ function exportTXT(data, filename) {
 }
 
 function exportJSON(data, filename) {
-    const jsonStr = JSON.stringify(data, null, 2);
+    const jsonWithSerial = data.map((item, index) => ({
+        s_no: index + 1,
+        ...item
+    }));
+    const jsonStr = JSON.stringify(jsonWithSerial, null, 2);
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
     downloadFile(url, `${filename}.json`);
@@ -327,11 +336,11 @@ function exportDOC(data, filename) {
         <h2>Guest List Export</h2>
         <table border="1" style="border-collapse: collapse; width: 100%;">
             <tr style="background: #eee;">
-                <th>Name</th><th>Age/Gender</th><th>Phone</th><th>Status</th>
+                <th>S.No.</th><th>Name</th><th>Age/Gender</th><th>Phone</th><th>Status</th>
             </tr>
     `;
-    data.forEach(row => {
-        htmlBody += `<tr><td>${row.name}</td><td>${row.age} / ${row.gender}</td><td>${row.phone}</td><td>${row.status}</td></tr>`;
+    data.forEach((row, index) => {
+        htmlBody += `<tr><td>${index + 1}</td><td>${row.name}</td><td>${row.age} / ${row.gender}</td><td>${row.phone}</td><td>${row.status}</td></tr>`;
     });
     htmlBody += "</table></body></html>";
     const blob = new Blob(['\ufeff', htmlBody], { type: 'application/msword' });
@@ -780,6 +789,13 @@ const bookedTicketsTable = document.getElementById('bookedTicketsTable');
 function renderBookedTickets() {
     bookedTicketsTable.innerHTML = '';
 
+    // HANDLE HEADER VISIBILITY
+    // Finds the first header (checkbox column) and toggles it
+    const checkHeader = document.querySelector('.tickets-table thead th:first-child');
+    if(checkHeader) {
+        checkHeader.style.display = isSelectionMode ? 'table-cell' : 'none';
+    }
+
     // 1. FILTER
     let displayTickets = bookedTickets.filter(ticket => {
         const matchesSearch = ticket.name.toLowerCase().includes(searchTerm) || ticket.phone.includes(searchTerm);
@@ -793,8 +809,8 @@ function renderBookedTickets() {
 
     // 2. SORT
     displayTickets.sort((a, b) => {
-        if (currentSort === 'newest') return b.createdAt - a.createdAt;
-        if (currentSort === 'oldest') return a.createdAt - b.createdAt;
+        if (currentSort === 'newest' || currentSort === 'serial-desc') return b.createdAt - a.createdAt;
+        if (currentSort === 'oldest' || currentSort === 'serial-asc') return a.createdAt - b.createdAt;
         if (currentSort === 'name-asc') return a.name.localeCompare(b.name);
         if (currentSort === 'name-desc') return b.name.localeCompare(a.name);
         if (currentSort === 'age-asc') return Number(a.age) - Number(b.age);
@@ -806,11 +822,14 @@ function renderBookedTickets() {
     currentFilteredTickets = displayTickets;
 
     if(displayTickets.length === 0) {
-        bookedTicketsTable.innerHTML = '<tr><td colspan="7" style="text-align:center; padding: 30px; color: #666;">No matching guests found.</td></tr>';
+        bookedTicketsTable.innerHTML = '<tr><td colspan="8" style="text-align:center; padding: 30px; color: #666;">No matching guests found.</td></tr>';
         return;
     }
 
-    displayTickets.forEach(ticket => {
+    // Display logic for the checkbox column in rows
+    const checkboxDisplayStyle = isSelectionMode ? 'table-cell' : 'none';
+
+    displayTickets.forEach((ticket, index) => {
         const tr = document.createElement('tr');
         tr.dataset.id = ticket.id;
         
@@ -822,8 +841,10 @@ function renderBookedTickets() {
 
         const isChecked = selectedTicketIds.has(ticket.id) ? 'checked' : '';
 
+        // Added Index+1 for Serial Number Column
         tr.innerHTML = `
-            <td><input type="checkbox" class="ticket-checkbox" style="transform: scale(1.2);" ${isChecked}></td>
+            <td style="display: ${checkboxDisplayStyle};"><input type="checkbox" class="ticket-checkbox" style="transform: scale(1.2);" ${isChecked}></td>
+            <td style="text-align: center; color: var(--accent-secondary); font-weight: bold;">${index + 1}</td>
             <td style="font-weight: 500; color: white;">${ticket.name}</td>
             <td>${ticket.age} / ${ticket.gender}</td>
             <td>${ticket.phone}</td>
@@ -1018,12 +1039,13 @@ selectBtn.addEventListener('click', () => {
     selectBtn.textContent = isSelectionMode ? 'Cancel' : 'Select';
     if(!isSelectionMode) {
         selectedTicketIds.clear(); 
-        renderBookedTickets(); 
         selectAllCheckbox.checked = false;
         updateSelectionCount();
     } else {
         exportTriggerBtn.disabled = true;
     }
+    // RE-RENDER TO SHOW/HIDE COLUMNS
+    renderBookedTickets(); 
 });
 
 selectAllCheckbox.addEventListener('change', (e) => {
