@@ -1,4 +1,4 @@
-# 🎫 Event Ticketing System (Midnight Edition)
+# 🎫 Event Ticketing System (Midnight Void Edition)
 
 > A high-end, real-time event management dashboard featuring a
 > glassmorphism UI, secure cloud synchronization, intelligent QR entry
