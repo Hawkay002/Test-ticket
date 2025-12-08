@@ -1180,3 +1180,48 @@ if ("serviceWorker" in navigator) {
         navigator.serviceWorker.register("/service-worker.js").catch(err => console.log("SW failed:", err));
     });
 }
+
+// --- SIDE CONTACT TRAY LOGIC ---
+const contactTray = document.getElementById('contactTray');
+const trayToggle = document.getElementById('trayToggle');
+const trayIcon = document.getElementById('trayIcon');
+
+if (trayToggle && contactTray) {
+    trayToggle.addEventListener('click', (e) => {
+        e.stopPropagation(); // Prevent closing immediately if we add document click listener
+        contactTray.classList.toggle('open');
+        
+        // Toggle Icon
+        if (contactTray.classList.contains('open')) {
+            trayIcon.classList.remove('fa-chevron-left');
+            trayIcon.classList.add('fa-chevron-right');
+            
+            // Add Blur Effect to content
+            document.getElementById('appContent').classList.add('content-blur');
+            document.getElementById('star-container').classList.add('content-blur');
+        } else {
+            trayIcon.classList.remove('fa-chevron-right');
+            trayIcon.classList.add('fa-chevron-left');
+            
+            // Remove Blur Effect
+            document.getElementById('appContent').classList.remove('content-blur');
+            document.getElementById('star-container').classList.remove('content-blur');
+        }
+    });
+
+    // Close tray when clicking outside
+    document.addEventListener('click', (e) => {
+        if (contactTray.classList.contains('open') && 
+            !contactTray.contains(e.target) && 
+            !trayToggle.contains(e.target)) {
+            
+            contactTray.classList.remove('open');
+            trayIcon.classList.remove('fa-chevron-right');
+            trayIcon.classList.add('fa-chevron-left');
+            
+            // Remove Blur Effect
+            document.getElementById('appContent').classList.remove('content-blur');
+            document.getElementById('star-container').classList.remove('content-blur');
+        }
+    });
+}
