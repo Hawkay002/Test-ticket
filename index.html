@@ -56,7 +56,7 @@
         </div>
     </div>
 
-    <!-- Unlock Modal -->
+    <!-- Unlock Modal (Local) -->
     <div id="unlock-modal" class="modal-overlay">
         <div class="modal-box">
             <h3>Device Locked</h3>
@@ -70,7 +70,41 @@
         </div>
     </div>
 
-    <!-- Ticket View Modal (New) -->
+    <!-- Admin Remote Lock Modal (New) -->
+    <div id="admin-lock-modal" class="modal-overlay">
+        <div class="modal-box" style="max-width: 450px;">
+            <h3>Remote Security Control</h3>
+            <p>Configure access for <span id="adminTargetUser" style="color: var(--accent-secondary); font-weight: 600;">User</span></p>
+            
+            <div class="password-wrapper" style="margin-bottom: 20px;">
+                 <input type="password" id="adminLockPassword" class="premium-input" placeholder="Set Session Password">
+                 <i class="fa-regular fa-eye password-toggle-icon" id="toggleAdminLockPass"></i>
+            </div>
+
+            <div style="margin-bottom: 25px; display: flex; flex-direction: column; gap: 10px; text-align: left; background: rgba(255,255,255,0.03); padding: 15px; border-radius: 12px;">
+                <label style="color: #888; font-size: 0.8rem; text-transform: uppercase; margin-bottom: 5px; display: block;">Select Tabs to Lock:</label>
+                <label class="checkbox-label">
+                    <input type="checkbox" class="admin-lock-check" value="create"> Issue Ticket Tab
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" class="admin-lock-check" value="booked"> Guest List Tab
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" class="admin-lock-check" value="scanner"> Scanner Tab
+                </label>
+                <label class="checkbox-label">
+                    <input type="checkbox" class="admin-lock-check" value="settings"> Configuration Tab
+                </label>
+            </div>
+
+            <div class="modal-actions">
+                <button id="cancelAdminLock" class="modal-btn secondary">Cancel</button>
+                <button id="applyAdminLock" class="modal-btn danger">Apply Lock</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Ticket View Modal -->
     <div id="ticket-view-modal" class="modal-overlay">
         <div class="modal-box" style="padding: 0; background: transparent; box-shadow: none; border: none; max-width: 400px; width: 100%;">
             <div class="ticket-modal-content" style="background: var(--bg-deep); padding: 25px; border-radius: 24px; border: 1px solid var(--border-subtle); position: relative; box-shadow: 0 25px 50px rgba(0,0,0,0.8);">
@@ -321,7 +355,7 @@
                                 <tr>
                                     <th></th>
                                     <th style="width: 50px; text-align: center;">#</th> <!-- New Serial Column -->
-                                    <th class="guest-name-col">Guest Name</th> <!-- UPDATED CLASS AND TEXT HERE -->
+                                    <th class="guest-name-col">Guest Name</th>
                                     <th>Details</th>
                                     <th>Contact</th>
                                     <th>Ticket ID</th> <!-- Renamed -->
@@ -373,14 +407,28 @@
                         <p style="font-size: 0.9rem; color: #888;"><strong>Time:</strong> <span id="currentDeadline" style="color: white;">--</span></p>
                     </div>
 
-                    <!-- NEW SECURITY SECTION -->
-                    <div class="lock-section" style="margin-top: 40px; border-top: 1px solid var(--border-subtle); padding-top: 30px;">
-                        <h3 style="font-size: 1.2rem; margin-bottom: 15px; color: white;">Lock Tabs</h3>
+                    <!-- NEW ADMIN CONTROL PANEL (Hidden for non-admins) -->
+                    <div id="admin-panel" style="display: none; margin-top: 40px; border-top: 1px solid var(--border-subtle); padding-top: 30px;">
+                        <h3 style="font-size: 1.2rem; margin-bottom: 15px; color: var(--accent-secondary); display: flex; align-items: center; gap: 10px;">
+                            <i class="fa-solid fa-shield-halved"></i> Admin Control
+                        </h3>
                         <p style="color: #888; font-size: 0.9rem; margin-bottom: 20px;">
-                            Secure this device. The password is global for all devices.
+                            Manage active sessions and lock remote devices instantly.
                         </p>
                         
-                        <!-- CHANGED: Moved margin to wrapper, removed from input to fix eye alignment -->
+                        <!-- List of Connected Users -->
+                        <div id="active-users-list" class="user-list-grid">
+                            <div style="text-align: center; color: #666; width: 100%; padding: 20px;">Scanning for active staff...</div>
+                        </div>
+                    </div>
+
+                    <!-- EXISTING SECURITY SECTION (Self Lock) -->
+                    <div class="lock-section" id="local-lock-section" style="margin-top: 40px; border-top: 1px solid var(--border-subtle); padding-top: 30px;">
+                        <h3 style="font-size: 1.2rem; margin-bottom: 15px; color: white;">Lock This Device</h3>
+                        <p style="color: #888; font-size: 0.9rem; margin-bottom: 20px;">
+                            Secure this specific device.
+                        </p>
+                        
                         <div class="password-wrapper" style="margin-bottom: 20px;">
                              <input type="password" id="lockSettingPassword" class="premium-input" placeholder="Password">
                              <i class="fa-regular fa-eye password-toggle-icon" id="toggleLockPassword"></i>
@@ -396,6 +444,7 @@
                             <label class="checkbox-label">
                                 <input type="checkbox" class="lock-checkbox" value="scanner"> Scanner Tab
                             </label>
+                            <!-- Settings is always locked if locked -->
                         </div>
 
                         <button id="lockSystemBtn" class="premium-btn" style="background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
