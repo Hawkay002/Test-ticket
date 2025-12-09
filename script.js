@@ -1,6 +1,6 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-import { getFirestore, collection, doc, setDoc, addDoc, onSnapshot, getDocs, query, deleteDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+import { getFirestore, collection, doc, setDoc, addDoc, onSnapshot, getDocs, query, deleteDoc, updateDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 // ==========================================
 // FIREBASE CONFIGURATION
@@ -20,12 +20,16 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 const APP_COLLECTION_ROOT = 'ticket_events_data';
+const DIRECTORY_PATH = '_directory'; // Special collection for user discovery
+const ADMIN_EMAIL = 'admin.test@gmail.com';
 
 let currentUser = null;
 let ticketsUnsubscribe = null;
 let settingsUnsubscribe = null;
 let securityUnsubscribe = null;
+let adminDirectoryUnsubscribe = null; // Listener for Admin
 let autoCheckInterval = null;
+let heartbeatInterval = null;
 
 // --- SECURITY STATE ---
 // globalPassword comes from DB (Synced across devices)
@@ -73,7 +77,7 @@ function showToast(title, msg) {
     toast.innerHTML = `
         <div class="toast-title">${title}</div>
         <div class="toast-msg">${msg}</div>
-        <div class="toast-note">Tip: Check Configuration for settings.</div>
+        <div class="toast-note">System Notification</div>
     `;
     container.appendChild(toast);
     
@@ -102,19 +106,28 @@ const cancelDeleteBtn = document.getElementById('cancelDelete');
 const confirmDeleteBtn = document.getElementById('confirmDelete');
 let pendingDeleteIds = [];
 
-// Lock Modal Elements
+// Lock Modal Elements (Local)
 const unlockModal = document.getElementById('unlock-modal');
 const unlockPasswordInput = document.getElementById('unlockPasswordInput');
 const unlockError = document.getElementById('unlock-error');
 const cancelUnlockBtn = document.getElementById('cancelUnlock');
 const confirmUnlockBtn = document.getElementById('confirmUnlock');
 
+// Admin Lock Modal (Remote)
+const adminLockModal = document.getElementById('admin-lock-modal');
+const adminLockPassword = document.getElementById('adminLockPassword');
+const toggleAdminLockPass = document.getElementById('toggleAdminLockPass');
+const cancelAdminLockBtn = document.getElementById('cancelAdminLock');
+const applyAdminLockBtn = document.getElementById('applyAdminLock');
+const adminTargetUserSpan = document.getElementById('adminTargetUser');
+let currentAdminTargetUid = null;
+
 // Ticket View Modal Elements
 const ticketViewModal = document.getElementById('ticket-view-modal');
 const closeTicketModal = document.getElementById('closeTicketModal');
 const modalWhatsAppBtn = document.getElementById('modalWhatsAppBtn');
 
-// Security Setting Elements
+// Security Setting Elements (Local)
 const lockPasswordInput = document.getElementById('lockSettingPassword');
 const toggleLockPassword = document.getElementById('toggleLockPassword');
 const lockSystemBtn = document.getElementById('lockSystemBtn');
@@ -138,23 +151,22 @@ const filterDropdown = document.getElementById('filterDropdown');
 const refreshStatusIndicator = document.getElementById('refreshStatusIndicator');
 
 // --- PASSWORD TOGGLE LOGIC ---
-if (togglePassword && passwordInput) {
-    togglePassword.addEventListener('click', function () {
-        const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
-        passwordInput.setAttribute('type', type);
-        this.classList.toggle('fa-eye');
-        this.classList.toggle('fa-eye-slash');
-    });
+function setupPasswordToggle(toggleId, inputId) {
+    const toggle = document.getElementById(toggleId);
+    const input = document.getElementById(inputId);
+    if (toggle && input) {
+        toggle.addEventListener('click', function () {
+            const type = input.getAttribute('type') === 'password' ? 'text' : 'password';
+            input.setAttribute('type', type);
+            this.classList.toggle('fa-eye');
+            this.classList.toggle('fa-eye-slash');
+        });
+    }
 }
+setupPasswordToggle('togglePassword', 'passwordInput');
+setupPasswordToggle('toggleLockPassword', 'lockSettingPassword');
+setupPasswordToggle('toggleAdminLockPass', 'adminLockPassword');
 
-if (toggleLockPassword && lockPasswordInput) {
-    toggleLockPassword.addEventListener('click', function () {
-        const type = lockPasswordInput.getAttribute('type') === 'password' ? 'text' : 'password';
-        lockPasswordInput.setAttribute('type', type);
-        this.classList.toggle('fa-eye');
-        this.classList.toggle('fa-eye-slash');
-    });
-}
 
 // --- CONNECTION STATUS ---
 function updateOnlineStatus() {
@@ -211,184 +223,7 @@ async function performSync() {
 }
 refreshStatusIndicator.addEventListener('click', performSync);
 
-// --- EXPORT FUNCTIONALITY ---
-exportTriggerBtn.addEventListener('click', () => {
-    const count = selectedTicketIds.size;
-    if(count === 0) return; 
-    exportCountMsg.textContent = `Ready to export ${count} item${count !== 1 ? 's' : ''}.`;
-    const today = new Date().toISOString().slice(0, 10).replace(/-/g, '_');
-    exportFileName.value = `guest_list_${today}`;
-    exportModal.style.display = 'flex';
-});
-
-cancelExportBtn.addEventListener('click', () => {
-    exportModal.style.display = 'none';
-});
-
-confirmExportBtn.addEventListener('click', () => {
-    const filename = exportFileName.value || 'guest_list';
-    const format = exportFormat.value;
-    
-    let listToExport = [];
-    
-    if (selectedTicketIds.size > 0) {
-        listToExport = currentFilteredTickets.filter(t => selectedTicketIds.has(t.id));
-    } else {
-        exportModal.style.display = 'none';
-        return alert("No data selected to export.");
-    }
-    
-    switch(format) {
-        case 'csv': exportCSV(listToExport, filename); break;
-        case 'xlsx': exportXLSX(listToExport, filename); break;
-        case 'pdf': exportPDF(listToExport, filename); break;
-        case 'txt': exportTXT(listToExport, filename); break;
-        case 'json': exportJSON(listToExport, filename); break;
-        case 'doc': exportDOC(listToExport, filename); break;
-    }
-    exportModal.style.display = 'none';
-    showToast("Export Complete", `${listToExport.length} records saved as .${format}`);
-});
-
-function exportCSV(data, filename) {
-    let csvContent = "data:text/csv;charset=utf-8,";
-    csvContent += "S.No.,Guest Name,Age,Gender,Phone,Status,Ticket ID,Entry Time\n";
-    data.forEach((row, index) => {
-        const scannedTime = row.scannedAt ? new Date(row.scannedAt).toLocaleTimeString() : "";
-        const cleanName = row.name.replace(/,/g, ""); 
-        const rowStr = `${index + 1},${cleanName},${row.age},${row.gender},${row.phone},${row.status},${row.id},${scannedTime}`;
-        csvContent += rowStr + "\n";
-    });
-    downloadFile(encodeURI(csvContent), `${filename}.csv`);
-}
-
-function exportXLSX(data, filename) {
-    const worksheetData = data.map((row, index) => ({
-        "S.No.": index + 1,
-        "Guest Name": row.name,
-        "Age": row.age,
-        "Gender": row.gender,
-        "Phone": row.phone,
-        "Status": row.status,
-        "Ticket ID": row.id,
-        "Entry Time": row.scannedAt ? new Date(row.scannedAt).toLocaleTimeString() : ""
-    }));
-    const ws = XLSX.utils.json_to_sheet(worksheetData);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, "Guests");
-    XLSX.writeFile(wb, `${filename}.xlsx`);
-}
-
-function exportPDF(data, filename) {
-    const { jsPDF } = window.jspdf;
-    const doc = new jsPDF();
-    doc.text("Event Guest List", 14, 20);
-    doc.setFontSize(10);
-    doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 26);
-    const tableColumn = ["#", "Name", "Age", "Gender", "Phone", "Status", "Entry Time"];
-    const tableRows = [];
-    data.forEach((row, index) => {
-        tableRows.push([
-            index + 1,
-            row.name,
-            row.age,
-            row.gender,
-            row.phone,
-            row.status.toUpperCase(),
-            row.scannedAt ? new Date(row.scannedAt).toLocaleTimeString() : "--"
-        ]);
-    });
-    doc.autoTable({ head: [tableColumn], body: tableRows, startY: 32 });
-    doc.save(`${filename}.pdf`);
-}
-
-function exportTXT(data, filename) {
-    let content = `GUEST LIST EXPORT - ${new Date().toLocaleString()}\n\n`;
-    data.forEach((row, i) => {
-        content += `${i+1}. ${row.name.toUpperCase()} \n`;
-        content += `   Details: ${row.age} / ${row.gender}\n`;
-        content += `   Phone: ${row.phone}\n`;
-        content += `   Status: ${row.status.toUpperCase()}\n`;
-        if(row.scannedAt) content += `   Entry: ${new Date(row.scannedAt).toLocaleTimeString()}\n`;
-        content += `   ID: ${row.id}\n`;
-        content += "----------------------------------------\n";
-    });
-    const blob = new Blob([content], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    downloadFile(url, `${filename}.txt`);
-}
-
-function exportJSON(data, filename) {
-    const jsonWithSerial = data.map((item, index) => ({
-        s_no: index + 1,
-        ...item
-    }));
-    const jsonStr = JSON.stringify(jsonWithSerial, null, 2);
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    downloadFile(url, `${filename}.json`);
-}
-
-function exportDOC(data, filename) {
-    let htmlBody = `
-        <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
-        <head><meta charset='utf-8'><title>Guest List</title></head><body>
-        <h2>Guest List Export</h2>
-        <table border="1" style="border-collapse: collapse; width: 100%;">
-            <tr style="background: #eee;">
-                <th>S.No.</th><th>Name</th><th>Age/Gender</th><th>Phone</th><th>Status</th>
-            </tr>
-    `;
-    data.forEach((row, index) => {
-        htmlBody += `<tr><td>${index + 1}</td><td>${row.name}</td><td>${row.age} / ${row.gender}</td><td>${row.phone}</td><td>${row.status}</td></tr>`;
-    });
-    htmlBody += "</table></body></html>";
-    const blob = new Blob(['\ufeff', htmlBody], { type: 'application/msword' });
-    const url = URL.createObjectURL(blob);
-    downloadFile(url, `${filename}.doc`);
-}
-
-function downloadFile(uri, filename) {
-    const link = document.createElement("a");
-    link.href = uri;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-}
-
-// --- SEARCH & FILTER LISTENERS ---
-searchInput.addEventListener('input', (e) => {
-    searchTerm = e.target.value.toLowerCase().trim();
-    renderBookedTickets();
-});
-
-filterSortBtn.addEventListener('click', (e) => {
-    e.stopPropagation();
-    filterDropdown.classList.toggle('show');
-});
-
-window.addEventListener('click', () => {
-    filterDropdown.classList.remove('show');
-});
-
-document.querySelectorAll('.dropdown-item').forEach(item => {
-    item.addEventListener('click', (e) => {
-        e.stopPropagation();
-        const type = item.dataset.type;
-        const val = item.dataset.val;
-        document.querySelectorAll(`.dropdown-item[data-type="${type}"]`).forEach(el => el.classList.remove('selected'));
-        item.classList.add('selected');
-
-        if(type === 'filter') currentFilter = val;
-        if(type === 'filter-gender') currentGenderFilter = val;
-        if(type === 'sort') currentSort = val;
-
-        renderBookedTickets();
-        filterDropdown.classList.remove('show');
-    });
-});
-
+// --- AUTH STATE LISTENER ---
 onAuthStateChanged(auth, (user) => {
     if (user) {
         currentUser = user;
@@ -396,6 +231,18 @@ onAuthStateChanged(auth, (user) => {
         loadingScreen.style.display = 'none';
         loginOverlay.style.display = 'none';
         appContent.style.display = 'block';
+        
+        // --- ADMIN CHECK ---
+        if(user.email === ADMIN_EMAIL) {
+            document.getElementById('admin-panel').style.display = 'block';
+            document.getElementById('local-lock-section').style.display = 'none'; // Hide local lock for admin for cleaner UI
+            setupAdminDashboard();
+        } else {
+            document.getElementById('admin-panel').style.display = 'none';
+            document.getElementById('local-lock-section').style.display = 'block';
+            startHeartbeat(user); // Start presence tracking for non-admins
+        }
+
         setupRealtimeListeners(user.uid);
         
         // Initialize Local Security State
@@ -409,12 +256,194 @@ onAuthStateChanged(auth, (user) => {
         loadingScreen.style.display = 'none';
         loginOverlay.style.display = 'flex';
         appContent.style.display = 'none';
+        
+        // Clean up listeners
         if (ticketsUnsubscribe) ticketsUnsubscribe();
         if (settingsUnsubscribe) settingsUnsubscribe();
         if (securityUnsubscribe) securityUnsubscribe();
+        if (adminDirectoryUnsubscribe) adminDirectoryUnsubscribe();
         if (autoCheckInterval) clearInterval(autoCheckInterval);
+        if (heartbeatInterval) clearInterval(heartbeatInterval);
     }
 });
+
+// ==========================================
+// HEARTBEAT SYSTEM (USER PRESENCE)
+// ==========================================
+async function startHeartbeat(user) {
+    if(!user) return;
+    
+    // Generate or retrieve a persistent device ID for this browser
+    let deviceId = localStorage.getItem('device_session_id');
+    if (!deviceId) {
+        deviceId = 'dev_' + Math.random().toString(36).substr(2, 9);
+        localStorage.setItem('device_session_id', deviceId);
+    }
+
+    const registryRef = doc(db, APP_COLLECTION_ROOT, DIRECTORY_PATH, 'users', user.uid);
+
+    const beat = async () => {
+        if(!currentUser) return;
+        try {
+            // Read current registry data to update session map without overwriting others
+            // Note: In high concurrency, a transaction is better, but this is simple for valid use cases
+            const docSnap = await getDoc(registryRef);
+            let sessions = {};
+            if(docSnap.exists()) {
+                sessions = docSnap.data().sessions || {};
+            }
+
+            // Prune old sessions (> 60 seconds inactive)
+            const now = Date.now();
+            Object.keys(sessions).forEach(key => {
+                if(now - sessions[key] > 60000) {
+                    delete sessions[key];
+                }
+            });
+
+            // Update MY session
+            sessions[deviceId] = now;
+
+            // Write back
+            await setDoc(registryRef, {
+                email: user.email,
+                sessions: sessions,
+                lastSeen: now // Global last seen
+            }, { merge: true });
+
+        } catch (e) {
+            console.error("Heartbeat failed", e);
+        }
+    };
+
+    // Initial beat
+    beat();
+    // Loop
+    heartbeatInterval = setInterval(beat, 15000); // 15 seconds
+}
+
+// ==========================================
+// ADMIN DASHBOARD LOGIC
+// ==========================================
+function setupAdminDashboard() {
+    const usersRef = collection(db, APP_COLLECTION_ROOT, DIRECTORY_PATH, 'users');
+    
+    adminDirectoryUnsubscribe = onSnapshot(usersRef, (snapshot) => {
+        const container = document.getElementById('active-users-list');
+        container.innerHTML = '';
+        
+        if (snapshot.empty) {
+            container.innerHTML = '<div style="text-align: center; color: #666; padding: 20px;">No active users found.</div>';
+            return;
+        }
+
+        snapshot.forEach(docSnap => {
+            const userData = docSnap.data();
+            const uid = docSnap.id;
+            
+            // Skip admin himself if he ends up in registry
+            if(userData.email === ADMIN_EMAIL) return;
+
+            // Calculate Online Status & Device Count
+            const now = Date.now();
+            let deviceCount = 0;
+            let isOnline = false;
+
+            if(userData.sessions) {
+                // Count sessions active in last 40 seconds (allow some buffer)
+                const activeSessions = Object.values(userData.sessions).filter(ts => (now - ts) < 40000);
+                deviceCount = activeSessions.length;
+                if(deviceCount > 0) isOnline = true;
+            }
+
+            const statusClass = isOnline ? 'online' : '';
+            const statusText = isOnline ? 'Online' : 'Offline';
+            const deviceText = deviceCount === 1 ? '1 Device' : `${deviceCount} Devices`;
+
+            // Create Card
+            const card = document.createElement('div');
+            card.className = 'user-card';
+            card.innerHTML = `
+                <div class="user-card-header">
+                    <span class="user-email" title="${userData.email}">${userData.email}</span>
+                    <span class="user-status-dot ${statusClass}" title="${statusText}"></span>
+                </div>
+                <div class="user-meta">
+                    <span class="user-device-count"><i class="fa-solid fa-desktop"></i> ${deviceText}</span>
+                    <span style="font-size: 0.75rem;">${isOnline ? 'Active Now' : 'Last seen: ' + new Date(userData.lastSeen || 0).toLocaleTimeString()}</span>
+                </div>
+                <div class="user-card-actions">
+                    <button class="admin-action-btn lock-btn" data-uid="${uid}" data-email="${userData.email}">
+                        <i class="fa-solid fa-lock"></i> Configure Lock
+                    </button>
+                </div>
+            `;
+            container.appendChild(card);
+        });
+
+        // Add Listeners to Buttons
+        document.querySelectorAll('.lock-btn').forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                const uid = e.target.closest('button').dataset.uid;
+                const email = e.target.closest('button').dataset.email;
+                openAdminLockModal(uid, email);
+            });
+        });
+    });
+}
+
+// --- ADMIN LOCK MODAL LOGIC ---
+function openAdminLockModal(uid, email) {
+    currentAdminTargetUid = uid;
+    adminTargetUserSpan.textContent = email;
+    adminLockPassword.value = '';
+    
+    // Clear checkboxes
+    document.querySelectorAll('.admin-lock-check').forEach(cb => cb.checked = false);
+    
+    // Optional: Fetch current lock state to pre-fill? 
+    // For simplicity, we start fresh, or admin overwrites.
+    
+    adminLockModal.style.display = 'flex';
+}
+
+cancelAdminLockBtn.addEventListener('click', () => {
+    adminLockModal.style.display = 'none';
+    currentAdminTargetUid = null;
+});
+
+applyAdminLockBtn.addEventListener('click', async () => {
+    if(!currentAdminTargetUid) return;
+
+    const password = adminLockPassword.value;
+    if(!password) return alert("Please set a session password.");
+
+    const selectedTabs = [];
+    document.querySelectorAll('.admin-lock-check:checked').forEach(cb => {
+        selectedTabs.push(cb.value);
+    });
+
+    const lockData = {
+        password: password,
+        lockedTabs: selectedTabs,
+        remoteLock: true, // Marker for client to know it's forced
+        updatedAt: Date.now()
+    };
+
+    try {
+        await setDoc(doc(db, APP_COLLECTION_ROOT, currentAdminTargetUid, 'settings', 'security'), lockData, { merge: true });
+        showToast("Command Sent", "Lock configuration applied to target devices.");
+        adminLockModal.style.display = 'none';
+    } catch (err) {
+        console.error("Admin lock failed:", err);
+        alert("Failed to apply lock.");
+    }
+});
+
+
+// ==========================================
+// CORE APP LOGIC (LOGIN, TICKET, ETC)
+// ==========================================
 
 loginButton.addEventListener('click', async () => {
     const email = emailInput.value;
@@ -482,12 +511,31 @@ function setupRealtimeListeners(userId) {
         }
     });
 
-    // --- SECURITY LISTENER (Global Password Only) ---
+    // --- SECURITY LISTENER (REMOTE LOCK SYNC) ---
     const securityRef = doc(db, APP_COLLECTION_ROOT, userId, 'settings', 'security');
     securityUnsubscribe = onSnapshot(securityRef, (docSnap) => {
         if (docSnap.exists()) {
-            // Only sync the password from DB
-            globalPassword = docSnap.data().password || "";
+            const data = docSnap.data();
+            
+            // 1. Sync Password
+            globalPassword = data.password || "";
+            
+            // 2. Check for Remote Lock (Forced by Admin)
+            if (data.remoteLock === true && currentUser.email !== ADMIN_EMAIL) {
+                // Enforce lock locally
+                localLockState.isLocked = true;
+                localLockState.lockedTabs = data.lockedTabs || [];
+                saveLocalSecurityState();
+                applySecurityLocks();
+                
+                // Show notification only if it wasn't already locked exactly this way
+                // (Simple check to avoid toast spam)
+                const currentHash = JSON.stringify(localLockState);
+                if(sessionStorage.getItem('lastLockHash') !== currentHash) {
+                    showToast("Security Update", "Administrator has locked your access.");
+                    sessionStorage.setItem('lastLockHash', currentHash);
+                }
+            }
         } else {
             globalPassword = "";
         }
@@ -529,9 +577,12 @@ function applySecurityLocks() {
             if(btn) btn.classList.add('locked');
         });
 
-        // Update Lock Controls UI
-        lockSystemBtn.innerHTML = '<i class="fa-solid fa-lock"></i> Locked';
-        lockSystemBtn.classList.add('active'); 
+        // Update Lock Controls UI (If visible)
+        if(lockSystemBtn) {
+            lockSystemBtn.innerHTML = '<i class="fa-solid fa-lock"></i> Locked';
+            lockSystemBtn.classList.add('active'); 
+            lockSystemBtn.disabled = true;
+        }
         
         // Fill checkboxes based on state & disable them
         lockCheckboxes.forEach(cb => {
@@ -540,85 +591,92 @@ function applySecurityLocks() {
         });
         lockPasswordInput.disabled = true;
         lockPasswordInput.value = ''; // Hide password
-        lockSystemBtn.disabled = true;
+
+        // If current tab is locked, move away
+        const activeBtn = document.querySelector('.nav-btn.active');
+        if(activeBtn) {
+            const currentTab = activeBtn.dataset.tab;
+            if(lockedTabs.includes(currentTab) || currentTab === 'settings') {
+                 // Try to find an unlocked tab
+                 const unlocked = ['create', 'booked', 'scanner'].find(t => !lockedTabs.includes(t));
+                 if(unlocked) {
+                     document.querySelector(`[data-tab="${unlocked}"]`).click();
+                 } else {
+                     // If all locked, stay on create but it's visually locked (edge case)
+                     document.querySelector(`[data-tab="create"]`).click();
+                 }
+            }
+        }
+
     } else {
         // Unlocked State
         lockCheckboxes.forEach(cb => {
             cb.disabled = false;
         });
         lockPasswordInput.disabled = false;
-        lockSystemBtn.disabled = false;
-        lockSystemBtn.innerHTML = '<i class="fa-solid fa-lock"></i> Lock Tabs';
+        if(lockSystemBtn) {
+            lockSystemBtn.disabled = false;
+            lockSystemBtn.innerHTML = '<i class="fa-solid fa-lock"></i> Lock Tabs';
+        }
     }
 }
 
-// --- LOCK ACTION ---
-lockSystemBtn.addEventListener('click', async () => {
-    if(!currentUser) return;
-    
-    const inputPassword = lockPasswordInput.value;
-    if(!inputPassword) {
-        alert("Please set a password to lock the system.");
-        return;
-    }
+// --- LOCK ACTION (LOCAL) ---
+if(lockSystemBtn) {
+    lockSystemBtn.addEventListener('click', async () => {
+        if(!currentUser) return;
+        
+        const inputPassword = lockPasswordInput.value;
+        if(!inputPassword) {
+            alert("Please set a password to lock the system.");
+            return;
+        }
 
-    const selectedTabs = [];
-    lockCheckboxes.forEach(cb => {
-        if(cb.checked) selectedTabs.push(cb.value);
-    });
+        const selectedTabs = [];
+        lockCheckboxes.forEach(cb => {
+            if(cb.checked) selectedTabs.push(cb.value);
+        });
 
-    // 1. Check against Global Password (Prevent Overwrite)
-    if (globalPassword && globalPassword !== inputPassword) {
-        showToast("Access Denied", "Incorrect Master Password. You cannot overwrite the existing global password.");
-        playError();
-        lockPasswordInput.classList.add('shake');
-        setTimeout(() => lockPasswordInput.classList.remove('shake'), 500);
-        return;
-    }
+        // 1. Check against Global Password (Prevent Overwrite)
+        if (globalPassword && globalPassword !== inputPassword) {
+            showToast("Access Denied", "Incorrect Master Password. You cannot overwrite the existing global password.");
+            playError();
+            lockPasswordInput.classList.add('shake');
+            setTimeout(() => lockPasswordInput.classList.remove('shake'), 500);
+            return;
+        }
 
-    try {
-        // 2. Only Save to DB if NO global password exists (First time setup)
-        if (!globalPassword) {
-            await setDoc(doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'settings', 'security'), {
-                password: inputPassword
-            }, { merge: true });
+        try {
+            // 2. Only Save to DB if NO global password exists (First time setup)
+            if (!globalPassword) {
+                await setDoc(doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'settings', 'security'), {
+                    password: inputPassword,
+                    remoteLock: false // Local lock is not remote
+                }, { merge: true });
+                
+                globalPassword = inputPassword;
+                showToast("Setup Complete", "Global Master Password set.");
+            }
             
-            // Immediately update local reference to avoid race condition in same session
-            globalPassword = inputPassword;
-            showToast("Setup Complete", "Global Master Password set.");
+            // 3. Save Lock State Locally
+            localLockState = {
+                isLocked: true,
+                lockedTabs: selectedTabs
+            };
+            saveLocalSecurityState();
+
+            // 4. Apply UI changes
+            applySecurityLocks();
+            showToast("Device Locked", "Configuration and selected tabs are now secured.");
+
+        } catch (err) {
+            console.error("Lock error:", err);
+            alert("Failed to process lock request.");
         }
-        
-        // 3. Save Lock State Locally (To LocalStorage)
-        localLockState = {
-            isLocked: true,
-            lockedTabs: selectedTabs
-        };
-        saveLocalSecurityState();
+    });
+}
 
-        // 4. Apply UI changes immediately
-        applySecurityLocks();
-        
-        // Force navigate away from settings to a safe tab
-        if(!selectedTabs.includes('create')) {
-            document.querySelector('[data-tab="create"]').click();
-        } else if (!selectedTabs.includes('booked')) {
-            document.querySelector('[data-tab="booked"]').click();
-        } else if (!selectedTabs.includes('scanner')) {
-            document.querySelector('[data-tab="scanner"]').click();
-        } else {
-            // If everything is locked, default to Create but it will show locked
-            document.querySelector('[data-tab="create"]').click();
-        }
-
-        showToast("Device Locked", "Configuration and selected tabs are now secured on this device.");
-
-    } catch (err) {
-        console.error("Lock error:", err);
-        alert("Failed to process lock request.");
-    }
-});
-
-// --- UNLOCK ACTION ---
+// --- UNLOCK ACTION (GLOBAL FOR BOTH LOCAL AND REMOTE LOCKS) ---
 cancelUnlockBtn.addEventListener('click', () => {
     unlockModal.style.display = 'none';
     unlockPasswordInput.value = '';
@@ -628,7 +686,7 @@ cancelUnlockBtn.addEventListener('click', () => {
 confirmUnlockBtn.addEventListener('click', () => {
     const enteredPass = unlockPasswordInput.value;
     
-    // Compare against GLOBAL password synced from DB
+    // Compare against GLOBAL password synced from DB (which Admin sets if remote locked)
     if(enteredPass === globalPassword) {
         // Unlock this device locally
         localLockState.isLocked = false;
@@ -686,12 +744,12 @@ async function checkAutoAbsent() {
 const navButtons = document.querySelectorAll('.nav-btn');
 const tabs = document.querySelectorAll('.tab-content');
 
-// UPDATED NAV LOGIC FOR LOCKING
+// NAV LOGIC
 navButtons.forEach(button => {
     button.addEventListener('click', (e) => {
         const targetTab = button.dataset.tab;
 
-        // Security Check (Local State)
+        // Security Check
         if (localLockState.isLocked) {
             // Case 1: Clicking Configuration (Always locked if system is locked)
             if (targetTab === 'settings') {
@@ -704,7 +762,7 @@ navButtons.forEach(button => {
             // Case 2: Clicking a specifically locked tab
             if (localLockState.lockedTabs.includes(targetTab)) {
                 e.preventDefault();
-                showToast("Access Denied", "This tab is locked on this device.");
+                showToast("Access Denied", "This tab is locked.");
                 return; // Stop navigation
             }
         }
@@ -790,7 +848,6 @@ function renderBookedTickets() {
     bookedTicketsTable.innerHTML = '';
 
     // HANDLE HEADER VISIBILITY
-    // Finds the first header (checkbox column) and toggles it
     const checkHeader = document.querySelector('.tickets-table thead th:first-child');
     if(checkHeader) {
         checkHeader.style.display = isSelectionMode ? 'table-cell' : 'none';
@@ -826,7 +883,6 @@ function renderBookedTickets() {
         return;
     }
 
-    // Display logic for the checkbox column in rows
     const checkboxDisplayStyle = isSelectionMode ? 'table-cell' : 'none';
 
     displayTickets.forEach((ticket, index) => {
@@ -836,29 +892,18 @@ function renderBookedTickets() {
         let statusHtml = `<span class="status-badge status-${ticket.status}">${ticket.status.replace('-', ' ')}</span>`;
         if(ticket.status === 'arrived' && ticket.scannedAt) {
             const dateObj = new Date(ticket.scannedAt);
-            
-            // Format Date: DD/MMM/YYYY
             const day = String(dateObj.getDate()).padStart(2, '0');
             const month = dateObj.toLocaleString('en-US', { month: 'short' }).toUpperCase();
             const year = dateObj.getFullYear();
             const dateStr = `${day}/${month}/${year}`;
+            const timeStr = dateObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
 
-            // Format Time: HH:MM:SS AM/PM
-            const timeStr = dateObj.toLocaleTimeString('en-US', { 
-                hour: '2-digit', 
-                minute: '2-digit', 
-                second: '2-digit', 
-                hour12: true 
-            });
-
-            // Added Date Line
-            statusHtml += `<div style="font-size: 0.6rem; color: #888; margin-top: 3px; white-space: nowrap;">On - ${dateStr}</div>`;
-            statusHtml += `<div style="font-size: 0.6rem; color: #888; white-space: nowrap;">At - ${timeStr}</div>`;
+            statusHtml += `<div style="font-size: 0.75rem; color: #888; margin-top: 3px; white-space: nowrap;">On - ${dateStr}</div>`;
+            statusHtml += `<div style="font-size: 0.75rem; color: #888; white-space: nowrap;">At - ${timeStr}</div>`;
         }
 
         const isChecked = selectedTicketIds.has(ticket.id) ? 'checked' : '';
 
-        // UPDATED: Details Column now uses flex to force side-by-side layout
         tr.innerHTML = `
             <td style="display: ${checkboxDisplayStyle};"><input type="checkbox" class="ticket-checkbox" style="transform: scale(1.2);" ${isChecked}></td>
             <td style="text-align: center; color: var(--accent-secondary); font-weight: bold;">${index + 1}</td>
@@ -882,7 +927,6 @@ function renderBookedTickets() {
         btn.addEventListener('click', (e) => {
             const ticket = bookedTickets.find(t => t.id === e.target.dataset.id);
             if(ticket) {
-                // MODAL PREVIEW LOGIC (Independent of Create Tab Lock)
                 document.getElementById('modalTicketName').textContent = ticket.name;
                 document.getElementById('modalTicketAgeGender').textContent = `${ticket.age} / ${ticket.gender}`;
                 document.getElementById('modalTicketPhone').textContent = ticket.phone;
