@@ -157,8 +157,6 @@ button {
     border-radius: 16px;
     padding: 10px;
     min-width: 220px;
-    max-height: 45vh;
-    overflow-y: scroll;
     box-shadow: 0 20px 50px rgba(0,0,0,0.5);
     z-index: 100;
     display: none;
@@ -732,7 +730,7 @@ th {
 }
 
 td {
-    padding: 8px;
+    padding: 18px;
     border-bottom: 1px solid var(--border-subtle);
     font-weight: 300;
     vertical-align: middle;
@@ -998,7 +996,7 @@ tr:hover td {
     color: white;
 }
 
-.lock-checkbox {
+.lock-checkbox, .admin-lock-check {
     margin-right: 12px;
     transform: scale(1.3);
     accent-color: #ef4444;
@@ -1254,4 +1252,104 @@ tr:hover td {
     top: auto;
     bottom: 100%;
     border-color: transparent transparent #222 transparent;
+}
+
+/* --- Admin Panel Styles --- */
+.user-list-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+    gap: 15px;
+    margin-top: 20px;
+}
+
+.user-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-subtle);
+    border-radius: 12px;
+    padding: 15px;
+    transition: var(--transition);
+    position: relative;
+    overflow: hidden;
+    animation: fadeIn 0.4s ease;
+}
+
+.user-card:hover {
+    background: rgba(255, 255, 255, 0.05);
+    border-color: rgba(255, 255, 255, 0.1);
+}
+
+.user-card-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 8px;
+}
+
+.user-email {
+    font-size: 0.9rem;
+    font-weight: 500;
+    color: white;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 80%;
+}
+
+.user-status-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background-color: #666; /* Default offline */
+    box-shadow: 0 0 5px rgba(0,0,0,0.5);
+}
+
+.user-status-dot.online {
+    background-color: var(--success-green);
+    box-shadow: 0 0 8px var(--success-green);
+}
+
+.user-meta {
+    font-size: 0.8rem;
+    color: var(--text-muted);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin-bottom: 15px;
+}
+
+.user-device-count {
+    background: rgba(255, 255, 255, 0.1);
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.75rem;
+}
+
+.user-card-actions {
+    display: flex;
+    gap: 10px;
+}
+
+.admin-action-btn {
+    flex: 1;
+    padding: 8px;
+    border-radius: 6px;
+    border: 1px solid var(--border-subtle);
+    background: transparent;
+    color: var(--text-muted);
+    font-size: 0.85rem;
+    transition: var(--transition);
+}
+
+.admin-action-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: white;
+}
+
+.admin-action-btn.lock-btn {
+    border-color: rgba(239, 68, 68, 0.3);
+    color: #ef4444;
+}
+
+.admin-action-btn.lock-btn:hover {
+    background: rgba(239, 68, 68, 0.1);
 }
