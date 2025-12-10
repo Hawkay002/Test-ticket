@@ -52,9 +52,9 @@ let selectedTicketIds = new Set();
 let eventSettings = { name: '', place: '', deadline: '' };
 
 // Admin/Security State
-let remoteLockedTabs = []; 
-let selectedUserForConfig = null;
-let managedUsersDeviceCache = {}; // Stores timestamps: { 'email': [timestamp1, timestamp2] }
+let remoteLockedTabs = []; // Tabs locked for this user
+let selectedUserForConfig = null; // Admin selection
+let managedUsersDeviceCache = {}; // Cache for instant admin updates
 
 // UI State
 let searchTerm = '';
@@ -62,7 +62,7 @@ let currentFilter = 'all';
 let currentGenderFilter = 'all';
 let currentSort = 'newest';
 let isSelectionMode = false;
-let isCooldown = false; 
+let isCooldown = false; // For scanner
 
 // ==========================================
 // 3. DOM ELEMENT SELECTION
@@ -151,6 +151,7 @@ const trayIcon = document.getElementById('trayIcon');
 // 4. HEARTBEAT & PRESENCE LOGIC
 // ==========================================
 
+// Helper to generate a persistent ID for this browser
 function getDeviceId() {
     let id = localStorage.getItem('device_session_id');
     if (!id) {
@@ -167,7 +168,7 @@ function startHeartbeat(userEmail) {
     // Immediate update
     updateHeartbeat(userEmail);
 
-    // Update every 10 seconds (standard heartbeat)
+    // Update every 10 seconds
     heartbeatInterval = setInterval(() => {
         updateHeartbeat(userEmail);
     }, 10000);
@@ -175,6 +176,7 @@ function startHeartbeat(userEmail) {
 
 async function updateHeartbeat(userEmail) {
     try {
+        // Path: /global_presence/{userEmail}/devices/{deviceId}
         const deviceRef = doc(db, 'global_presence', userEmail, 'devices', currentDeviceId);
         
         await setDoc(deviceRef, {
@@ -197,21 +199,29 @@ onAuthStateChanged(auth, async (user) => {
         currentUser = user;
         userEmailDisplay.textContent = user.email;
         
+        // UI Transitions
         loadingScreen.style.display = 'none';
         loginOverlay.style.display = 'none';
         appContent.style.display = 'block';
         
+        // 1. Setup Standard Data Listeners (Tickets, Settings)
         setupRealtimeListeners(user.uid);
+        
+        // 2. Start Presence Heartbeat (So Admin sees us)
         startHeartbeat(user.email);
 
+        // 3. Conditional Setup based on Role
         if (user.email === ADMIN_EMAIL) {
             setupAdminPanel();
         } else {
+            // Listen for locks applied TO this user
             listenForRemoteLocks(user.email);
+            // UI Adjustments for non-admin
             adminLockPanel.style.display = 'none';
             userLockStatus.style.display = 'block';
         }
 
+        // 4. Start Auto-Sync for Guest List (15s)
         if(autoCheckInterval) clearInterval(autoCheckInterval);
         autoCheckInterval = setInterval(performSync, 15000);
 
@@ -219,11 +229,12 @@ onAuthStateChanged(auth, async (user) => {
         // --- LOGGED OUT ---
         currentUser = null;
         
+        // UI Transitions
         loadingScreen.style.display = 'none';
         loginOverlay.style.display = 'flex';
         appContent.style.display = 'none';
         
-        // Cleanup all intervals and listeners
+        // Cleanup
         if (heartbeatInterval) clearInterval(heartbeatInterval);
         if (adminUiRefreshInterval) clearInterval(adminUiRefreshInterval);
         if (ticketsUnsubscribe) ticketsUnsubscribe();
@@ -235,7 +246,7 @@ onAuthStateChanged(auth, async (user) => {
     }
 });
 
-// Login Button
+// Login Button Action
 loginButton.addEventListener('click', async () => {
     const email = emailInput.value;
     const password = passwordInput.value;
@@ -266,13 +277,14 @@ function showError(msg) {
     loginButton.disabled = false;
 }
 
-// Logout Button
+// Logout Button Action
 logoutBtn.addEventListener('click', () => {
     signOut(auth);
+    // Reloading ensures a clean state
     window.location.reload();
 });
 
-// Password Toggle
+// Password Visibility Toggle
 if (togglePassword && passwordInput) {
     togglePassword.addEventListener('click', function () {
         const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
@@ -284,7 +296,7 @@ if (togglePassword && passwordInput) {
 
 
 // ==========================================
-// 6. INSTANT ADMIN DASHBOARD LOGIC (UPDATED)
+// 6. INSTANT ADMIN DASHBOARD LOGIC
 // ==========================================
 
 function setupAdminPanel() {
@@ -318,10 +330,9 @@ function setupAdminPanel() {
         adminPresenceUnsubscribes.push(unsub);
     });
 
-    // 2. Set interval ONLY for local timeout check
-    // (If user disconnects abruptly, no DB write happens, so we need to locally check expiry)
+    // 2. Set interval ONLY for local timeout check (rendering only, no network calls)
     if(adminUiRefreshInterval) clearInterval(adminUiRefreshInterval);
-    adminUiRefreshInterval = setInterval(renderManagedUsersList, 5000); // Check expiry every 5s
+    adminUiRefreshInterval = setInterval(renderManagedUsersList, 5000); 
     
     // Initial Render
     renderManagedUsersList();
@@ -474,7 +485,7 @@ function applyRemoteLocks(tabsToLock) {
 
 
 // ==========================================
-// 8. VISUALS & UTILITIES (Toasts, Stars, Sounds)
+// 8. VISUALS & UTILITIES
 // ==========================================
 
 function createStars() {
@@ -840,8 +851,10 @@ function updateSelectionCount() {
     const count = selectedTicketIds.size;
     selectionCountSpan.textContent = `(${count} selected)`;
     exportTriggerBtn.disabled = count === 0;
+    
     const allVisibleSelected = currentFilteredTickets.length > 0 && 
                                currentFilteredTickets.every(t => selectedTicketIds.has(t.id));
+    
     if(currentFilteredTickets.length === 0) selectAllCheckbox.checked = false;
     else selectAllCheckbox.checked = allVisibleSelected;
 }
@@ -1277,5 +1290,3 @@ if ("serviceWorker" in navigator) {
         navigator.serviceWorker.register("/service-worker.js").catch(err => console.log("SW failed:", err));
     });
 }
-
-
