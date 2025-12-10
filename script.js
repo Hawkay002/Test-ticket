@@ -3,7 +3,7 @@ import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from
 import { getFirestore, collection, doc, setDoc, addDoc, onSnapshot, getDocs, query, deleteDoc, updateDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 // ==========================================
-// FIREBASE CONFIGURATION
+// 1. FIREBASE CONFIGURATION
 // ==========================================
 const firebaseConfig = {
     apiKey: "AIzaSyBYzmAZQ8sKHjXgVh_t-vbtYN_gRzBstw8",
@@ -20,19 +20,22 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 // ==========================================
-// CONSTANTS & STATE
+// 2. CONSTANTS & GLOBAL STATE
 // ==========================================
 const APP_COLLECTION_ROOT = 'ticket_events_data';
 const ADMIN_EMAIL = 'admin.test@gmail.com';
 
-// Define the hierarchy of staff for the Admin Dashboard
 const MANAGED_USERS = [
     { email: 'eveman.test@gmail.com', role: 'Event Manager' },
     { email: 'regdesk.test@gmail.com', role: 'Registration Desk' },
     { email: 'sechead.test@gmail.com', role: 'Security Head' }
 ];
 
+// User & Auth State
 let currentUser = null;
+let currentDeviceId = null;
+
+// Firestore Unsubscribers
 let ticketsUnsubscribe = null;
 let settingsUnsubscribe = null;
 
@@ -41,28 +44,29 @@ let autoCheckInterval = null;
 let heartbeatInterval = null;
 let adminRefreshInterval = null;
 
-// State
-let currentDeviceId = null;
-let selectedTicketIds = new Set(); 
-let currentFilteredTickets = []; 
+// Data State
 let bookedTickets = [];
+let currentFilteredTickets = []; 
+let selectedTicketIds = new Set(); 
 let eventSettings = { name: '', place: '', deadline: '' };
 
 // Admin/Security State
-let remoteLockedTabs = []; // Stores tabs locked by admin for the current user
-let selectedUserForConfig = null; // Admin: currently selected user to configure
+let remoteLockedTabs = []; // Tabs locked for this user
+let selectedUserForConfig = null; // Admin selection
 
-// Search/Filter State
+// UI State
 let searchTerm = '';
 let currentFilter = 'all'; 
 let currentGenderFilter = 'all';
 let currentSort = 'newest';
 let isSelectionMode = false;
+let isCooldown = false; // For scanner
 
 // ==========================================
-// DOM ELEMENTS
+// 3. DOM ELEMENT SELECTION
 // ==========================================
-// Login & Layout
+
+// Login & Loading
 const loginOverlay = document.getElementById('login-overlay');
 const loadingScreen = document.getElementById('loading-screen');
 const appContent = document.getElementById('appContent');
@@ -78,7 +82,7 @@ const logoutBtn = document.getElementById('logoutBtn');
 const navButtons = document.querySelectorAll('.nav-btn');
 const tabs = document.querySelectorAll('.tab-content');
 
-// Admin Panel Elements
+// Admin Panel
 const adminLockPanel = document.getElementById('admin-lock-panel');
 const userLockStatus = document.getElementById('user-lock-status');
 const managedUsersList = document.getElementById('managed-users-list');
@@ -99,7 +103,7 @@ const startScanBtn = document.getElementById('startScanBtn');
 const scannerVideo = document.getElementById('scanner-video');
 const scanResult = document.getElementById('scanResult');
 
-// Guest List
+// Guest List & Filters
 const bookedTicketsTable = document.getElementById('bookedTicketsTable');
 const refreshStatusIndicator = document.getElementById('refreshStatusIndicator');
 const searchInput = document.getElementById('searchGuestInput');
@@ -120,12 +124,10 @@ const cancelExportBtn = document.getElementById('cancelExport');
 const confirmExportBtn = document.getElementById('confirmExport');
 const exportCountMsg = document.getElementById('export-count-msg');
 
-// Forms & Ticket Preview
+// Ticket Creation & Views
 const ticketForm = document.getElementById('ticketForm');
 const eventSettingsForm = document.getElementById('eventSettingsForm');
 const whatsappBtn = document.getElementById('whatsappBtn');
-
-// Ticket View Modal
 const ticketViewModal = document.getElementById('ticket-view-modal');
 const closeTicketModal = document.getElementById('closeTicketModal');
 const modalWhatsAppBtn = document.getElementById('modalWhatsAppBtn');
@@ -137,20 +139,17 @@ const cancelDeleteBtn = document.getElementById('cancelDelete');
 const confirmDeleteBtn = document.getElementById('confirmDelete');
 let pendingDeleteIds = [];
 
+// Contact Tray
+const contactTray = document.getElementById('contactTray');
+const trayToggle = document.getElementById('trayToggle');
+const trayIcon = document.getElementById('trayIcon');
+
 
 // ==========================================
-// HELPER FUNCTIONS & HEARTBEAT
+// 4. HEARTBEAT & PRESENCE LOGIC
 // ==========================================
 
-function sanitizeEmail(email) {
-    // Firebase document IDs cannot contain '/' etc. Email is safe usually but dots/symbols might need encoding
-    // For simplicity, we just replace dots with underscores for doc IDs if needed, 
-    // but Firestore allows dots in IDs. However, keeping it consistent is good.
-    // Here we will use email as is, but if issues arise, replace dots.
-    // Firestore path segments cannot be empty.
-    return email; 
-}
-
+// Helper to generate a persistent ID for this browser
 function getDeviceId() {
     let id = localStorage.getItem('device_session_id');
     if (!id) {
@@ -160,12 +159,11 @@ function getDeviceId() {
     return id;
 }
 
-// --- HEARTBEAT SYSTEM (DEVICE PRESENCE) ---
 function startHeartbeat(userEmail) {
     if (heartbeatInterval) clearInterval(heartbeatInterval);
     currentDeviceId = getDeviceId();
     
-    // Initial update
+    // Immediate update
     updateHeartbeat(userEmail);
 
     // Update every 10 seconds
@@ -176,57 +174,66 @@ function startHeartbeat(userEmail) {
 
 async function updateHeartbeat(userEmail) {
     try {
-        // Path: ticket_events_data/global_presence/{userEmail}/{deviceId}
-        const deviceRef = doc(db, APP_COLLECTION_ROOT, 'global_presence', userEmail, currentDeviceId);
+        // Updated Path: /global_presence/{userEmail}/devices/{deviceId}
+        // This is accessible via the new rules
+        const deviceRef = doc(db, 'global_presence', userEmail, 'devices', currentDeviceId);
+        
         await setDoc(deviceRef, {
             lastSeen: Date.now(),
             userAgent: navigator.userAgent
         }, { merge: true });
     } catch (e) {
-        console.error("Heartbeat fail", e);
+        console.error("Heartbeat failed (Check Rules):", e);
     }
 }
 
 
 // ==========================================
-// AUTHENTICATION & INITIALIZATION
+// 5. AUTHENTICATION LIFECYCLE
 // ==========================================
 
 onAuthStateChanged(auth, async (user) => {
     if (user) {
+        // --- LOGGED IN ---
         currentUser = user;
         userEmailDisplay.textContent = user.email;
+        
+        // UI Transitions
         loadingScreen.style.display = 'none';
         loginOverlay.style.display = 'none';
         appContent.style.display = 'block';
         
-        // 1. Setup Data Listeners
+        // 1. Setup Standard Data Listeners (Tickets, Settings)
         setupRealtimeListeners(user.uid);
         
-        // 2. Start Heartbeat for Presence
+        // 2. Start Presence Heartbeat (So Admin sees us)
         startHeartbeat(user.email);
 
-        // 3. ADMIN Logic vs USER Logic
+        // 3. Conditional Setup based on Role
         if (user.email === ADMIN_EMAIL) {
             setupAdminPanel();
         } else {
-            // Listen for locks applied TO me
+            // Listen for locks applied TO this user
             listenForRemoteLocks(user.email);
-            // Hide admin panel, show status message
+            // UI Adjustments for non-admin
             adminLockPanel.style.display = 'none';
             userLockStatus.style.display = 'block';
         }
 
-        // 4. Auto Sync Interval for guest data consistency
+        // 4. Start Auto-Sync for Guest List (15s)
         if(autoCheckInterval) clearInterval(autoCheckInterval);
         autoCheckInterval = setInterval(performSync, 15000);
 
     } else {
+        // --- LOGGED OUT ---
         currentUser = null;
+        
+        // UI Transitions
         loadingScreen.style.display = 'none';
         loginOverlay.style.display = 'flex';
         appContent.style.display = 'none';
         
+        // Cleanup
         if (heartbeatInterval) clearInterval(heartbeatInterval);
         if (adminRefreshInterval) clearInterval(adminRefreshInterval);
         if (ticketsUnsubscribe) ticketsUnsubscribe();
@@ -234,7 +241,7 @@ onAuthStateChanged(auth, async (user) => {
     }
 });
 
-// Login Handler
+// Login Button Action
 loginButton.addEventListener('click', async () => {
     const email = emailInput.value;
     const password = passwordInput.value;
@@ -250,8 +257,8 @@ loginButton.addEventListener('click', async () => {
     try {
         await signInWithEmailAndPassword(auth, email, password);
     } catch (error) {
-        console.error("Login failed:", error);
-        showError("Access Denied. Check credentials.");
+        console.error("Login Error:", error);
+        showError("Access Denied. Please check credentials.");
     } finally {
         loginButton.textContent = "Authenticate";
         loginButton.disabled = false;
@@ -265,13 +272,14 @@ function showError(msg) {
     loginButton.disabled = false;
 }
 
-// Logout Handler
+// Logout Button Action
 logoutBtn.addEventListener('click', () => {
     signOut(auth);
-    location.reload();
+    // Reloading ensures a clean state
+    window.location.reload();
 });
 
-// Password Toggle
+// Password Visibility Toggle
 if (togglePassword && passwordInput) {
     togglePassword.addEventListener('click', function () {
         const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
@@ -283,17 +291,19 @@ if (togglePassword && passwordInput) {
 
 
 // ==========================================
-// ADMIN PANEL LOGIC
+// 6. ADMIN DASHBOARD LOGIC
 // ==========================================
 
 function setupAdminPanel() {
     adminLockPanel.style.display = 'block';
     userLockStatus.style.display = 'none';
     
-    // Periodically update the list to reflect online/offline status
+    // Initial fetch
     updateManagedUsersList();
+    
+    // Refresh list every 10s to update Online/Offline status
     if(adminRefreshInterval) clearInterval(adminRefreshInterval);
-    adminRefreshInterval = setInterval(updateManagedUsersList, 10000); // Check every 10s
+    adminRefreshInterval = setInterval(updateManagedUsersList, 10000);
 }
 
 async function updateManagedUsersList() {
@@ -302,29 +312,31 @@ async function updateManagedUsersList() {
     let html = '';
 
     for (const user of MANAGED_USERS) {
-        // Path: ticket_events_data/global_presence/{userEmail}
-        const devicesRef = collection(db, APP_COLLECTION_ROOT, 'global_presence', user.email);
+        // Reads from the NEW path: /global_presence/{userEmail}/devices
+        const devicesRef = collection(db, 'global_presence', user.email, 'devices');
         
-        // Get all devices seen recently
         let activeDevices = 0;
         try {
             const snap = await getDocs(devicesRef);
             const now = Date.now();
+            
             snap.forEach(doc => {
                 const data = doc.data();
-                // If seen in last 30 seconds, consider online
+                // Threshold: 30 seconds (Heartbeat runs every 10s)
                 if (now - data.lastSeen < 30000) {
                     activeDevices++;
                 }
             });
-        } catch (e) { console.error(e); }
+        } catch (e) { 
+            console.error(`Error checking status for ${user.email}:`, e); 
+        }
 
         const isOnline = activeDevices > 0;
         const statusClass = isOnline ? 'online' : '';
         const statusText = isOnline ? `Online • ${activeDevices} Device${activeDevices > 1 ? 's' : ''}` : 'Offline';
         const activeClass = (selectedUserForConfig === user.email) ? 'active-selection' : '';
 
-        // We use onclick to call a global function defined below
+        // Add onclick handler string
         html += `
         <div class="user-card ${activeClass}" onclick="selectUserForConfig('${user.email}')">
             <div class="user-card-info">
@@ -342,20 +354,20 @@ async function updateManagedUsersList() {
     managedUsersList.innerHTML = html;
 }
 
-// Global function for onclick in innerHTML
+// Global function exposed for HTML onclick events
 window.selectUserForConfig = async function(email) {
     selectedUserForConfig = email;
     selectedUserEmailSpan.textContent = email;
     userLockConfigArea.style.display = 'block';
-    updateManagedUsersList(); // Refresh to show highlight
-
-    // Reset checkboxes first
-    remoteLockCheckboxes.forEach(cb => cb.checked = false);
     
-    // Only Admin (Create) and Guest List (Booked) and Scanner tabs are lockable usually
-    // Scanner is ID 'scanner', Create is 'create', List is 'booked'
+    // Refresh list to show active highlight
+    updateManagedUsersList(); 
+    
+    // Reset checkboxes when switching users
+    remoteLockCheckboxes.forEach(cb => cb.checked = false);
 }
 
+// Trigger Admin Lock Modal
 triggerLockModalBtn.addEventListener('click', () => {
     if (!selectedUserForConfig) return;
     lockTargetEmailSpan.textContent = selectedUserForConfig;
@@ -368,6 +380,7 @@ cancelAdminLock.addEventListener('click', () => {
     adminLockModal.style.display = 'none';
 });
 
+// Confirm & Write Lock to Firestore
 confirmAdminLock.addEventListener('click', async () => {
     const password = adminLockPassword.value;
     if (!password) {
@@ -375,15 +388,13 @@ confirmAdminLock.addEventListener('click', async () => {
         return;
     }
     
-    // Gather selected tabs
     const lockedTabs = [];
     remoteLockCheckboxes.forEach(cb => {
         if (cb.checked) lockedTabs.push(cb.value);
     });
 
-    // Path: ticket_events_data/global_locks/{userEmail}
-    const lockRef = doc(db, APP_COLLECTION_ROOT, 'global_locks', selectedUserForConfig);
-
+    // Write to NEW path: /global_locks/{userEmail}
+    const lockRef = doc(db, 'global_locks', selectedUserForConfig);
     const originalText = confirmAdminLock.textContent;
     confirmAdminLock.textContent = "Syncing...";
     
@@ -392,13 +403,13 @@ confirmAdminLock.addEventListener('click', async () => {
             lockedTabs: lockedTabs,
             adminPassword: password,
             updatedAt: Date.now()
-        });
+        }, { merge: true });
         
         showToast("Sync Successful", `Settings pushed to ${selectedUserForConfig}`);
         adminLockModal.style.display = 'none';
     } catch (e) {
-        console.error(e);
-        alert("Failed to sync locks.");
+        console.error("Lock sync failed:", e);
+        alert("Failed to sync locks. Check console for details.");
     } finally {
         confirmAdminLock.textContent = originalText;
     }
@@ -406,18 +417,20 @@ confirmAdminLock.addEventListener('click', async () => {
 
 
 // ==========================================
-// USER REMOTE LOCK LISTENER
+// 7. USER REMOTE LOCK LISTENER
 // ==========================================
 
 function listenForRemoteLocks(userEmail) {
-    const lockRef = doc(db, APP_COLLECTION_ROOT, 'global_locks', userEmail);
+    // Listen to NEW path: /global_locks/{userEmail}
+    const lockRef = doc(db, 'global_locks', userEmail);
     
     onSnapshot(lockRef, (doc) => {
         if (doc.exists()) {
             const data = doc.data();
             applyRemoteLocks(data.lockedTabs || []);
         } else {
-            applyRemoteLocks([]); // No locks
+            // Document doesn't exist implies no locks
+            applyRemoteLocks([]); 
         }
     });
 }
@@ -426,20 +439,20 @@ function applyRemoteLocks(tabsToLock) {
     remoteLockedTabs = tabsToLock;
     const allNavs = document.querySelectorAll('.nav-btn');
     
-    // Reset visual state
+    // 1. Reset visual state
     allNavs.forEach(btn => btn.classList.remove('locked'));
 
-    // Apply Lock UI
+    // 2. Apply Lock Icons
     tabsToLock.forEach(tabName => {
         const btn = document.querySelector(`[data-tab="${tabName}"]`);
         if(btn) btn.classList.add('locked');
     });
 
-    // Check if current tab is locked, if so, kick user to a safe tab
+    // 3. Security Kick: If user is currently on a locked tab, move them
     const currentActive = document.querySelector('.nav-btn.active');
     if (currentActive && tabsToLock.includes(currentActive.dataset.tab)) {
-        // Try to find a safe tab (Create -> Booked -> Scanner -> Settings)
         const allTabs = ['create', 'booked', 'scanner', 'settings'];
+        // Find first tab that isn't locked
         const safeTab = allTabs.find(t => !tabsToLock.includes(t));
         
         if (safeTab) {
@@ -447,7 +460,7 @@ function applyRemoteLocks(tabsToLock) {
             showToast("Access Restricted", "Administrator has locked this tab.");
             playError();
         } else {
-            // Everything locked? Go to settings (Configuration is usually left open for admin status view)
+            // If everything is locked, force to Settings (usually safe)
             document.querySelector('[data-tab="settings"]').click();
         }
     }
@@ -455,14 +468,12 @@ function applyRemoteLocks(tabsToLock) {
 
 
 // ==========================================
-// MAIN APP LOGIC (Guests, Tickets, etc.)
+// 8. VISUALS & UTILITIES (Toasts, Stars, Sounds)
 // ==========================================
 
-// --- STAR BACKGROUND ---
 function createStars() {
     const container = document.getElementById('star-container');
     const numberOfStars = 100;
-    
     for (let i = 0; i < numberOfStars; i++) {
         const star = document.createElement('div');
         star.classList.add('star');
@@ -477,7 +488,6 @@ function createStars() {
 }
 createStars();
 
-// --- TOASTS ---
 function showToast(title, msg) {
     const container = document.getElementById('toast-container');
     const toast = document.createElement('div');
@@ -494,10 +504,10 @@ function showToast(title, msg) {
     }, 5000);
 }
 
-// --- SOUNDS ---
 function playBeep() {
-    const audio = new Audio('success.mp3'); // Fallback logic included below
-    audio.play().catch(e => {
+    const audio = new Audio('success.mp3');
+    audio.play().catch(() => {
+        // Fallback Oscillator
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
         const osc = ctx.createOscillator();
         osc.connect(ctx.destination);
@@ -509,7 +519,8 @@ function playBeep() {
 
 function playError() {
     const audio = new Audio('error.mp3');
-    audio.play().catch(e => {
+    audio.play().catch(() => {
+        // Fallback Oscillator
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
         const osc = ctx.createOscillator();
         osc.type = 'sawtooth';
@@ -520,12 +531,17 @@ function playError() {
     });
 }
 
-// --- NAVIGATION ---
+
+// ==========================================
+// 9. APP NAVIGATION & DATA SYNC
+// ==========================================
+
+// Nav Button Click Logic
 navButtons.forEach(button => {
     button.addEventListener('click', (e) => {
         const targetTab = button.dataset.tab;
 
-        // Remote Lock Check
+        // Security Check
         if (remoteLockedTabs.includes(targetTab)) {
             e.preventDefault();
             showToast("Access Denied", "This tab is currently locked by the Administrator.");
@@ -533,12 +549,12 @@ navButtons.forEach(button => {
             return;
         }
 
-        // Stop scanner if leaving scanner tab
-        const scannerVideo = document.getElementById('scanner-video');
+        // Camera Cleanup
         if (scannerVideo.srcObject && button.dataset.tab !== 'scanner') {
             stopScan();
         }
 
+        // Switch Active Class
         navButtons.forEach(btn => btn.classList.remove('active'));
         button.classList.add('active');
 
@@ -551,9 +567,8 @@ navButtons.forEach(button => {
     });
 });
 
-// --- REALTIME DATA SYNC ---
+// Setup Realtime Listeners for Ticket Data
 function setupRealtimeListeners(userId) {
-    // Tickets Listener
     const ticketsRef = collection(db, APP_COLLECTION_ROOT, userId, 'tickets');
     const q = query(ticketsRef);
     
@@ -565,19 +580,16 @@ function setupRealtimeListeners(userId) {
         renderBookedTickets();
     });
 
-    // Settings Listener
     const settingsRef = doc(db, APP_COLLECTION_ROOT, userId, 'settings', 'config');
     settingsUnsubscribe = onSnapshot(settingsRef, (docSnap) => {
         if (docSnap.exists()) {
             eventSettings = docSnap.data();
             updateSettingsDisplay();
-        } else {
-            eventSettings = { name: '', place: '', deadline: '' };
-            updateSettingsDisplay();
         }
     });
 }
 
+// Manual Sync Function
 async function performSync() {
     if(!currentUser) return;
     const icon = refreshStatusIndicator.querySelector('i');
@@ -610,7 +622,11 @@ async function performSync() {
 }
 refreshStatusIndicator.addEventListener('click', performSync);
 
-// --- TICKET CREATION ---
+
+// ==========================================
+// 10. TICKET CREATION & PREVIEW
+// ==========================================
+
 ticketForm.addEventListener('submit', async (e) => {
     e.preventDefault();
     if (!currentUser) return;
@@ -634,9 +650,8 @@ ticketForm.addEventListener('submit', async (e) => {
         const docRef = await addDoc(collection(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets'), newTicket);
         updateTicketPreview({ ...newTicket, id: docRef.id });
         ticketForm.reset();
-        showToast("Success", "Ticket generated successfully.");
+        showToast("Success", "Ticket generated.");
     } catch (err) {
-        console.error(err);
         alert("Error creating ticket");
     }
 });
@@ -646,6 +661,7 @@ function updateTicketPreview(ticket) {
     document.getElementById('ticketAgeGender').textContent = `${ticket.age} / ${ticket.gender}`;
     document.getElementById('ticketPhone').textContent = ticket.phone;
     document.getElementById('ticketSerial').textContent = `ID: ${ticket.id}`;
+    
     const qrcodeContainer = document.getElementById('qrcode');
     qrcodeContainer.innerHTML = '';
     new QRCode(qrcodeContainer, {
@@ -656,10 +672,11 @@ function updateTicketPreview(ticket) {
         colorLight : "#ffffff",
         correctLevel: QRCode.CorrectLevel.H
     });
+    
     whatsappBtn.disabled = false;
 }
 
-// WhatsApp Share Handler
+// WhatsApp Share (Main Ticket)
 whatsappBtn.addEventListener('click', () => {
     const btn = whatsappBtn;
     const originalText = btn.textContent;
@@ -694,58 +711,48 @@ whatsappBtn.addEventListener('click', () => {
             const message = encodeURIComponent(`Hello ${name}, here is your Entry Pass 🎫.\n*Keep this QR code ready at the entrance.*`);
             window.location.href = `https://wa.me/${phone}?text=${message}`;
             
-            // Reset UI
+            // Reset
             btn.textContent = originalText;
             btn.disabled = true;
             document.getElementById('ticketName').textContent = '--';
-            document.getElementById('ticketAgeGender').textContent = '-- / --';
-            document.getElementById('ticketPhone').textContent = '--';
-            document.getElementById('ticketSerial').textContent = 'ID: --';
             document.getElementById('qrcode').innerHTML = '';
         }, 1500);
-
     }).catch(err => {
         console.error(err);
-        alert("Error generating ticket image");
         btn.textContent = originalText;
         btn.disabled = false;
+        alert("Error processing ticket.");
     });
 });
 
 
 // ==========================================
-// GUEST LIST: RENDER, SEARCH, FILTER
+// 11. GUEST LIST LOGIC
 // ==========================================
 
 function renderBookedTickets() {
     bookedTicketsTable.innerHTML = '';
-
-    // Handle Header Visibility (Checkbox column)
+    
+    // Toggle Selection Header
     const checkHeader = document.querySelector('.tickets-table thead th:first-child');
     if(checkHeader) {
         checkHeader.style.display = isSelectionMode ? 'table-cell' : 'none';
     }
 
-    // 1. FILTER
+    // Filter
     let displayTickets = bookedTickets.filter(ticket => {
         const matchesSearch = ticket.name.toLowerCase().includes(searchTerm) || ticket.phone.includes(searchTerm);
         if (!matchesSearch) return false;
-
         if (currentFilter !== 'all' && ticket.status !== currentFilter) return false;
         if (currentGenderFilter !== 'all' && ticket.gender !== currentGenderFilter) return false;
-
         return true;
     });
 
-    // 2. SORT
+    // Sort
     displayTickets.sort((a, b) => {
         if (currentSort === 'newest') return b.createdAt - a.createdAt;
         if (currentSort === 'oldest') return a.createdAt - b.createdAt;
         if (currentSort === 'name-asc') return a.name.localeCompare(b.name);
-        if (currentSort === 'name-desc') return b.name.localeCompare(a.name);
-        if (currentSort === 'age-asc') return Number(a.age) - Number(b.age);
-        if (currentSort === 'age-desc') return Number(b.age) - Number(a.age);
-        if (currentSort === 'gender') return a.gender.localeCompare(b.gender);
         return 0;
     });
 
@@ -767,7 +774,6 @@ function renderBookedTickets() {
             const dateObj = new Date(ticket.scannedAt);
             const dateStr = dateObj.toLocaleDateString();
             const timeStr = dateObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true });
-            
             statusHtml += `<div style="font-size: 0.6rem; color: #888; margin-top: 3px; white-space: nowrap;">${dateStr}</div>`;
             statusHtml += `<div style="font-size: 0.6rem; color: #888; white-space: nowrap;">${timeStr}</div>`;
         }
@@ -778,22 +784,16 @@ function renderBookedTickets() {
             <td style="display: ${checkboxDisplayStyle};"><input type="checkbox" class="ticket-checkbox" style="transform: scale(1.2);" ${isChecked}></td>
             <td style="text-align: center; color: var(--accent-secondary); font-weight: bold;">${index + 1}</td>
             <td style="font-weight: 500; color: white;">${ticket.name}</td>
-            <td>
-                <div style="display: flex; align-items: center; gap: 8px; white-space: nowrap;">
-                    <span>${ticket.age}</span>
-                    <span style="color: #444;">|</span>
-                    <span>${ticket.gender}</span>
-                </div>
-            </td>
+            <td>${ticket.age} / ${ticket.gender}</td>
             <td>${ticket.phone}</td>
-            <td style="font-family: monospace; font-size: 0.8rem; color: #888;">${ticket.id.substring(0, 8)}...</td>
+            <td style="font-family: monospace;">${ticket.id.substring(0, 8)}...</td>
             <td>${statusHtml}</td>
             <td><button class="action-btn-small view-ticket-btn" data-id="${ticket.id}">View</button></td>
         `;
         bookedTicketsTable.appendChild(tr);
     });
 
-    // Event Listeners for new elements
+    // Wire up events for dynamically created elements
     document.querySelectorAll('.view-ticket-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             const ticket = bookedTickets.find(t => t.id === e.target.dataset.id);
@@ -811,13 +811,12 @@ function renderBookedTickets() {
     });
 }
 
-// Search Handler
+// Search & Filter Events
 searchInput.addEventListener('input', (e) => {
     searchTerm = e.target.value.toLowerCase().trim();
     renderBookedTickets();
 });
 
-// Filter Dropdown Handler
 filterSortBtn.addEventListener('click', (e) => {
     e.stopPropagation();
     filterDropdown.classList.toggle('show');
@@ -832,6 +831,7 @@ document.querySelectorAll('.dropdown-item').forEach(item => {
         e.stopPropagation();
         const type = item.dataset.type;
         const val = item.dataset.val;
+        
         document.querySelectorAll(`.dropdown-item[data-type="${type}"]`).forEach(el => el.classList.remove('selected'));
         item.classList.add('selected');
 
@@ -846,15 +846,18 @@ document.querySelectorAll('.dropdown-item').forEach(item => {
 
 
 // ==========================================
-// SELECTION & DELETE
+// 12. SELECTION, DELETE & EXPORT
 // ==========================================
 
 function updateSelectionCount() {
     const count = selectedTicketIds.size;
     selectionCountSpan.textContent = `(${count} selected)`;
     exportTriggerBtn.disabled = count === 0;
+    
+    // Check if everything visible is selected
     const allVisibleSelected = currentFilteredTickets.length > 0 && 
                                currentFilteredTickets.every(t => selectedTicketIds.has(t.id));
+    
     if(currentFilteredTickets.length === 0) selectAllCheckbox.checked = false;
     else selectAllCheckbox.checked = allVisibleSelected;
 }
@@ -868,8 +871,6 @@ selectBtn.addEventListener('click', () => {
         selectedTicketIds.clear(); 
         selectAllCheckbox.checked = false;
         updateSelectionCount();
-    } else {
-        exportTriggerBtn.disabled = true;
     }
     renderBookedTickets(); 
 });
@@ -907,15 +908,11 @@ confirmDeleteBtn.addEventListener('click', async () => {
         confirmDeleteBtn.textContent = "Delete";
         pendingDeleteIds = [];
         selectedTicketIds.clear(); 
-        selectBtn.click(); 
+        selectBtn.click(); // Exit selection mode
     }
 });
 
-
-// ==========================================
-// EXPORT FUNCTIONALITY
-// ==========================================
-
+// Export Logic
 exportTriggerBtn.addEventListener('click', () => {
     const count = selectedTicketIds.size;
     if(count === 0) return; 
@@ -953,6 +950,7 @@ confirmExportBtn.addEventListener('click', () => {
     showToast("Export Complete", `${listToExport.length} records saved.`);
 });
 
+// Export Helpers
 function downloadFile(uri, filename) {
     const link = document.createElement("a");
     link.href = uri;
@@ -1031,10 +1029,7 @@ function exportTXT(data, filename) {
 }
 
 function exportJSON(data, filename) {
-    const jsonWithSerial = data.map((item, index) => ({
-        s_no: index + 1,
-        ...item
-    }));
+    const jsonWithSerial = data.map((item, index) => ({ s_no: index + 1, ...item }));
     const jsonStr = JSON.stringify(jsonWithSerial, null, 2);
     const blob = new Blob([jsonStr], { type: 'application/json' });
     const url = URL.createObjectURL(blob);
@@ -1062,7 +1057,7 @@ function exportDOC(data, filename) {
 
 
 // ==========================================
-// TICKET VIEW MODAL
+// 13. TICKET VIEW MODAL
 // ==========================================
 
 function openTicketModal(ticket) {
@@ -1089,7 +1084,6 @@ closeTicketModal.addEventListener('click', () => {
     ticketViewModal.style.display = 'none';
 });
 
-// Modal WhatsApp Share
 modalWhatsAppBtn.addEventListener('click', () => {
     const btn = modalWhatsAppBtn;
     const originalContent = btn.innerHTML;
@@ -1138,7 +1132,7 @@ modalWhatsAppBtn.addEventListener('click', () => {
 
 
 // ==========================================
-// SCANNER LOGIC
+// 14. SCANNER LOGIC
 // ==========================================
 
 startScanBtn.addEventListener('click', () => {
@@ -1169,8 +1163,6 @@ function stopScan() {
     startScanBtn.textContent = 'Activate Camera';
 }
 
-let isCooldown = false; 
-
 function tick() {
     if (!scannerVideo.srcObject) return;
     if (scannerVideo.readyState === scannerVideo.HAVE_ENOUGH_DATA) {
@@ -1197,6 +1189,7 @@ function tick() {
 async function validateTicket(ticketId) {
     const ticket = bookedTickets.find(t => t.id === ticketId);
     scanResult.style.display = 'block';
+    
     if(ticket) {
         if(ticket.status === 'coming-soon' && !ticket.scanned) {
             await updateDoc(doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets', ticketId), {
@@ -1226,7 +1219,7 @@ async function validateTicket(ticketId) {
 
 
 // ==========================================
-// CONFIGURATION (SETTINGS)
+// 15. SETTINGS FORM
 // ==========================================
 
 eventSettingsForm.addEventListener('submit', async (e) => {
@@ -1249,26 +1242,26 @@ function updateSettingsDisplay() {
     document.getElementById('currentEventPlace').textContent = eventSettings.place || 'Not set';
     document.getElementById('currentDeadline').textContent = eventSettings.deadline ? new Date(eventSettings.deadline).toLocaleString() : 'Not set';
     document.getElementById('eventNamePlace').textContent = eventSettings.name && eventSettings.place ? `${eventSettings.name} | ${eventSettings.place}` : 'EVENT DETAILS';
+    
+    // Form Values
     document.getElementById('eventName').value = eventSettings.name || '';
     document.getElementById('eventPlace').value = eventSettings.place || '';
     document.getElementById('arrivalDeadline').value = eventSettings.deadline || '';
+    
+    // Modal
     document.getElementById('modalEventNamePlace').textContent = eventSettings.name && eventSettings.place ? `${eventSettings.name} | ${eventSettings.place}` : 'EVENT DETAILS';
 }
 
 
 // ==========================================
-// SIDE CONTACT TRAY
+// 16. SIDE TRAY & PWA
 // ==========================================
-const contactTray = document.getElementById('contactTray');
-const trayToggle = document.getElementById('trayToggle');
-const trayIcon = document.getElementById('trayIcon');
 
 if (trayToggle && contactTray) {
     trayToggle.addEventListener('click', (e) => {
         e.stopPropagation();
         contactTray.classList.toggle('open');
         
-        // Toggle Icon & Blur
         if (contactTray.classList.contains('open')) {
             trayIcon.classList.remove('fa-chevron-left');
             trayIcon.classList.add('fa-chevron-right');
@@ -1282,7 +1275,6 @@ if (trayToggle && contactTray) {
         }
     });
 
-    // Close tray when clicking outside
     document.addEventListener('click', (e) => {
         if (contactTray.classList.contains('open') && 
             !contactTray.contains(e.target) && 
@@ -1297,11 +1289,8 @@ if (trayToggle && contactTray) {
     });
 }
 
-// Service Worker Registration
 if ("serviceWorker" in navigator) {
     window.addEventListener("load", () => {
         navigator.serviceWorker.register("/service-worker.js").catch(err => console.log("SW failed:", err));
     });
 }
-
-
