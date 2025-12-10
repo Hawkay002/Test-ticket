@@ -32,6 +32,7 @@ let settingsUnsubscribe = null;
 let securityUnsubscribe = null;
 let remoteLockUnsubscribe = null;
 let autoCheckInterval = null;
+let deviceRefreshInterval = null;
 
 // ==========================================
 // SESSION & DEVICE TRACKING
@@ -53,6 +54,7 @@ let eventSettings = { name: '', place: '', deadline: '' };
 // --- ADMIN STATE ---
 let allUsersSessions = [];
 let selectedUserForLock = null;
+let lastDeviceRefreshTime = null;
 
 // --- SEARCH & FILTER STATE ---
 let searchTerm = '';
@@ -191,7 +193,7 @@ async function storeUserEmail(userId, email) {
 }
 
 // ==========================================
-// ADMIN FUNCTIONS
+// ADMIN FUNCTIONS WITH REFRESH BUTTON
 // ==========================================
 
 function isAdmin() {
@@ -240,10 +242,26 @@ async function loadAllUserSessions() {
             });
         }
         
+        // Update last refresh time
+        lastDeviceRefreshTime = new Date();
         renderConnectedDevices();
+        
+        // Update refresh button state
+        const refreshBtn = document.getElementById('refreshDevicesBtn');
+        if (refreshBtn) {
+            refreshBtn.classList.remove('refreshing');
+            refreshBtn.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Refresh';
+        }
         
     } catch (error) {
         console.error("Error loading sessions:", error);
+        
+        // Update refresh button state even on error
+        const refreshBtn = document.getElementById('refreshDevicesBtn');
+        if (refreshBtn) {
+            refreshBtn.classList.remove('refreshing');
+            refreshBtn.innerHTML = '<i class="fa-solid fa-arrows-rotate"></i> Refresh';
+        }
         
         // Check if it's a permissions error
         if (error.code === 'permission-denied') {
@@ -262,24 +280,79 @@ async function loadAllUserSessions() {
     }
 }
 
+async function refreshDevices() {
+    const refreshBtn = document.getElementById('refreshDevicesBtn');
+    if (refreshBtn) {
+        refreshBtn.classList.add('refreshing');
+        refreshBtn.innerHTML = '<i class="fa-solid fa-spinner"></i> Refreshing...';
+    }
+    
+    await loadAllUserSessions();
+    showToast("Devices Refreshed", "Device list has been updated.");
+}
+
 function renderConnectedDevices() {
     const container = document.getElementById('connectedDevicesList');
     if (!container) return;
     
+    // Calculate device statistics
+    const now = Date.now();
+    const onlineDevices = allUsersSessions.filter(session => 
+        (now - session.lastActive.getTime()) < 60000
+    ).length;
+    const offlineDevices = allUsersSessions.length - onlineDevices;
+    const totalDevices = allUsersSessions.length;
+    
     if (allUsersSessions.length === 0) {
         container.innerHTML = `
+            <div class="device-stats">
+                <div class="stat-card">
+                    <span class="stat-value">0</span>
+                    <span class="stat-label">Total Devices</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-value stat-online">0</span>
+                    <span class="stat-label">Online</span>
+                </div>
+                <div class="stat-card">
+                    <span class="stat-value stat-offline">0</span>
+                    <span class="stat-label">Offline</span>
+                </div>
+            </div>
             <div style="text-align: center; color: #666; padding: 20px;">
                 <i class="fa-solid fa-user-slash"></i> No other devices connected
             </div>
+            ${lastDeviceRefreshTime ? 
+                `<div class="last-refresh-time">Last refreshed: ${lastDeviceRefreshTime.toLocaleTimeString()}</div>` : 
+                ''
+            }
         `;
         return;
     }
     
-    container.innerHTML = allUsersSessions.map((session, index) => {
+    // Create device list HTML
+    let devicesHTML = `
+        <div class="device-stats">
+            <div class="stat-card">
+                <span class="stat-value">${totalDevices}</span>
+                <span class="stat-label">Total Devices</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value stat-online">${onlineDevices}</span>
+                <span class="stat-label">Online</span>
+            </div>
+            <div class="stat-card">
+                <span class="stat-value stat-offline">${offlineDevices}</span>
+                <span class="stat-label">Offline</span>
+            </div>
+        </div>
+    `;
+    
+    allUsersSessions.forEach((session, index) => {
         const timeAgo = getTimeAgo(session.lastActive);
         const isOnline = (Date.now() - session.lastActive.getTime()) < 60000;
         
-        return `
+        devicesHTML += `
             <div class="device-card" data-user-id="${session.userId}" data-session-id="${session.sessionId}" 
                  style="background: ${isOnline ? 'rgba(16, 185, 129, 0.05)' : 'rgba(239, 68, 68, 0.05)'}; 
                         border: 1px solid ${isOnline ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)'}; 
@@ -307,7 +380,14 @@ function renderConnectedDevices() {
                 </div>
             </div>
         `;
-    }).join('');
+    });
+    
+    // Add last refresh time
+    if (lastDeviceRefreshTime) {
+        devicesHTML += `<div class="last-refresh-time">Last refreshed: ${lastDeviceRefreshTime.toLocaleTimeString()}</div>`;
+    }
+    
+    container.innerHTML = devicesHTML;
     
     // Add event listeners to device cards
     document.querySelectorAll('.device-card').forEach(card => {
@@ -599,6 +679,7 @@ const cancelAdminLockBtn = document.getElementById('cancelAdminLock');
 const applyAdminLockBtn = document.getElementById('applyAdminLock');
 const toggleAdminPassword = document.getElementById('toggleAdminPassword');
 const adminLockPassword = document.getElementById('adminLockPassword');
+const refreshDevicesBtn = document.getElementById('refreshDevicesBtn');
 
 // Password Toggle Logic
 if (togglePassword && passwordInput) {
@@ -631,6 +712,11 @@ if (toggleAdminPassword && adminLockPassword) {
 // Refresh Status Indicator
 if (refreshStatusIndicator) {
     refreshStatusIndicator.addEventListener('click', performSync);
+}
+
+// Refresh Devices Button
+if (refreshDevicesBtn) {
+    refreshDevicesBtn.addEventListener('click', refreshDevices);
 }
 
 // Admin Controls
@@ -669,8 +755,9 @@ onAuthStateChanged(auth, (user) => {
         if (isAdmin() && adminPanel) {
             adminPanel.style.display = 'block';
             loadAllUserSessions();
-            // Refresh device list every 30 seconds
-            setInterval(loadAllUserSessions, 30000);
+            // Set up auto-refresh every 30 seconds
+            if (deviceRefreshInterval) clearInterval(deviceRefreshInterval);
+            deviceRefreshInterval = setInterval(loadAllUserSessions, 30000);
         } else if (adminPanel) {
             adminPanel.style.display = 'none';
         }
@@ -684,6 +771,9 @@ onAuthStateChanged(auth, (user) => {
         if (currentUser) {
             cleanupSession(currentUser.uid);
         }
+        
+        // Clear intervals
+        if (deviceRefreshInterval) clearInterval(deviceRefreshInterval);
         
         currentUser = null;
         loadingScreen.style.display = 'none';
