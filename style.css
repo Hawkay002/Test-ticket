@@ -72,7 +72,7 @@ button {
     transition: filter 0.4s ease;
 }
 
-/* NEW CLASS FOR BLURRING CONTENT */
+/* BLUR UTILITY FOR TRAY */
 .content-blur {
     filter: blur(5px) brightness(0.5);
     pointer-events: none;
@@ -84,7 +84,93 @@ button {
     to { opacity: 1; transform: translateY(0); }
 }
 
-/* --- Search & Filter Bar Styles --- */
+/* ========================================= */
+/* ADMIN PANEL & MANAGED USER STYLES (NEW) */
+/* ========================================= */
+
+.managed-users-grid {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+}
+
+.user-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-subtle);
+    padding: 15px;
+    border-radius: 12px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.user-card:hover {
+    background: rgba(255, 255, 255, 0.06);
+    border-color: var(--accent-secondary);
+}
+
+.user-card.active-selection {
+    background: rgba(59, 130, 246, 0.1);
+    border-color: var(--accent-secondary);
+    box-shadow: 0 0 15px rgba(59, 130, 246, 0.1);
+}
+
+.user-card-info {
+    display: flex;
+    flex-direction: column;
+}
+
+.user-card-email {
+    color: white;
+    font-weight: 500;
+    font-size: 0.95rem;
+}
+
+.user-card-role {
+    color: var(--text-muted);
+    font-size: 0.8rem;
+    margin-top: 2px;
+}
+
+.user-status-indicator {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 0.75rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    padding: 4px 10px;
+    border-radius: 20px;
+    background: rgba(255, 255, 255, 0.05);
+    color: #666;
+    border: 1px solid transparent;
+}
+
+.user-status-indicator.online {
+    background: rgba(16, 185, 129, 0.15);
+    color: var(--success-green);
+    border: 1px solid rgba(16, 185, 129, 0.2);
+}
+
+.status-dot-pulse {
+    width: 8px;
+    height: 8px;
+    background-color: currentColor;
+    border-radius: 50%;
+    animation: pulseDot 1.5s infinite;
+}
+
+@keyframes pulseDot {
+    0% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.8); }
+    100% { opacity: 1; transform: scale(1); }
+}
+
+/* ========================================= */
+/* SEARCH & FILTER BAR STYLES */
+/* ========================================= */
 .search-filter-container {
     display: flex;
     gap: 15px;
@@ -738,11 +824,13 @@ td {
     vertical-align: middle;
 }
 
-/* SPECIFIC AUTO-WIDTH LOGIC FOR GUEST NAME */
+/* SPECIFIC AUTO-WIDTH LOGIC FOR GUEST NAME
+   Targeting the 3rd column (index 2) because col 1 is checkbox, col 2 is serial
+*/
 .tickets-table th.guest-name-col, 
 .tickets-table td:nth-child(3) {
-    white-space: nowrap;
-    width: 1%;
+    white-space: nowrap; /* Forces the text to stay on one line */
+    width: 1%; /* Trick: Makes the column shrink to fit content, but since content is nowrap, it expands to fit largest item */
 }
 
 tr:last-child td {
@@ -891,11 +979,6 @@ tr:hover td {
     opacity: 0.5;
 }
 
-@keyframes scanGlow {
-    0% { background-position: -100% -100%; }
-    100% { background-position: 200% 200%; }
-}
-
 /* --- Modals --- */
 .modal-overlay {
     position: fixed;
@@ -1001,7 +1084,7 @@ tr:hover td {
     color: white;
 }
 
-.lock-checkbox, .admin-lock-checkbox {
+.lock-checkbox, .remote-lock-checkbox {
     margin-right: 12px;
     transform: scale(1.3);
     accent-color: #ef4444;
@@ -1257,131 +1340,4 @@ tr:hover td {
     top: auto;
     bottom: 100%;
     border-color: transparent transparent #222 transparent;
-}
-
-/* Admin Panel Styles */
-.device-card {
-    transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-    cursor: pointer;
-}
-
-.device-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 5px 15px rgba(0,0,0,0.3);
-    border-color: var(--accent-secondary) !important;
-}
-
-.lock-device-btn {
-    background: rgba(239, 68, 68, 0.1) !important;
-    color: #ef4444 !important;
-    border: 1px solid rgba(239, 68, 68, 0.3) !important;
-}
-
-.lock-device-btn:hover {
-    background: rgba(239, 68, 68, 0.3) !important;
-    color: white !important;
-}
-
-#refreshDevicesBtn {
-    background: rgba(59, 130, 246, 0.1);
-    color: var(--accent-secondary);
-    border: 1px solid rgba(59, 130, 246, 0.3);
-}
-
-#refreshDevicesBtn:hover {
-    background: rgba(59, 130, 246, 0.3);
-    color: white;
-}
-
-#refreshDevicesBtn.refreshing {
-    pointer-events: none;
-    opacity: 0.7;
-}
-
-#refreshDevicesBtn.refreshing i {
-    animation: spin 1s linear infinite;
-}
-
-.shake {
-    animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both;
-}
-
-@keyframes shake {
-    10%, 90% { transform: translate3d(-1px, 0, 0); }
-    20%, 80% { transform: translate3d(2px, 0, 0); }
-    30%, 50%, 70% { transform: translate3d(-4px, 0, 0); }
-    40%, 60% { transform: translate3d(4px, 0, 0); }
-}
-
-/* Device Stats */
-.device-stats {
-    display: flex;
-    gap: 15px;
-    margin-bottom: 15px;
-    flex-wrap: wrap;
-}
-
-.stat-card {
-    background: rgba(255, 255, 255, 0.03);
-    border: 1px solid var(--border-subtle);
-    border-radius: 10px;
-    padding: 12px 15px;
-    flex: 1;
-    min-width: 120px;
-}
-
-.stat-value {
-    font-size: 1.5rem;
-    font-weight: 600;
-    color: white;
-    display: block;
-}
-
-.stat-label {
-    font-size: 0.8rem;
-    color: #888;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-}
-
-.stat-online {
-    color: #10b981;
-}
-
-.stat-offline {
-    color: #ef4444;
-}
-
-/* Last Refresh Time */
-.last-refresh-time {
-    font-size: 0.75rem;
-    color: #666;
-    text-align: center;
-    margin-top: 10px;
-    font-style: italic;
-}
-
-/* Responsive adjustments */
-@media (max-width: 768px) {
-    .device-card {
-        flex-direction: column;
-        gap: 10px;
-    }
-    
-    #adminLockControls {
-        padding: 15px;
-    }
-    
-    .lock-device-btn {
-        width: 100%;
-        margin-top: 10px;
-    }
-    
-    .device-stats {
-        flex-direction: column;
-    }
-    
-    .stat-card {
-        width: 100%;
-    }
 }
