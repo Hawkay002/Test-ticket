@@ -38,11 +38,12 @@ let currentDeviceId = null;
 // Firestore Unsubscribers
 let ticketsUnsubscribe = null;
 let settingsUnsubscribe = null;
+let adminPresenceUnsubscribes = []; // Array to store multiple listeners for admin
 
 // Intervals
 let autoCheckInterval = null;
 let heartbeatInterval = null;
-let adminRefreshInterval = null;
+let adminUiRefreshInterval = null;
 
 // Data State
 let bookedTickets = [];
@@ -51,8 +52,9 @@ let selectedTicketIds = new Set();
 let eventSettings = { name: '', place: '', deadline: '' };
 
 // Admin/Security State
-let remoteLockedTabs = []; // Tabs locked for this user
-let selectedUserForConfig = null; // Admin selection
+let remoteLockedTabs = []; 
+let selectedUserForConfig = null;
+let managedUsersDeviceCache = {}; // Stores timestamps: { 'email': [timestamp1, timestamp2] }
 
 // UI State
 let searchTerm = '';
@@ -60,7 +62,7 @@ let currentFilter = 'all';
 let currentGenderFilter = 'all';
 let currentSort = 'newest';
 let isSelectionMode = false;
-let isCooldown = false; // For scanner
+let isCooldown = false; 
 
 // ==========================================
 // 3. DOM ELEMENT SELECTION
@@ -149,7 +151,6 @@ const trayIcon = document.getElementById('trayIcon');
 // 4. HEARTBEAT & PRESENCE LOGIC
 // ==========================================
 
-// Helper to generate a persistent ID for this browser
 function getDeviceId() {
     let id = localStorage.getItem('device_session_id');
     if (!id) {
@@ -166,7 +167,7 @@ function startHeartbeat(userEmail) {
     // Immediate update
     updateHeartbeat(userEmail);
 
-    // Update every 10 seconds
+    // Update every 10 seconds (standard heartbeat)
     heartbeatInterval = setInterval(() => {
         updateHeartbeat(userEmail);
     }, 10000);
@@ -174,8 +175,6 @@ function startHeartbeat(userEmail) {
 
 async function updateHeartbeat(userEmail) {
     try {
-        // Updated Path: /global_presence/{userEmail}/devices/{deviceId}
-        // This is accessible via the new rules
         const deviceRef = doc(db, 'global_presence', userEmail, 'devices', currentDeviceId);
         
         await setDoc(deviceRef, {
@@ -198,29 +197,21 @@ onAuthStateChanged(auth, async (user) => {
         currentUser = user;
         userEmailDisplay.textContent = user.email;
         
-        // UI Transitions
         loadingScreen.style.display = 'none';
         loginOverlay.style.display = 'none';
         appContent.style.display = 'block';
         
-        // 1. Setup Standard Data Listeners (Tickets, Settings)
         setupRealtimeListeners(user.uid);
-        
-        // 2. Start Presence Heartbeat (So Admin sees us)
         startHeartbeat(user.email);
 
-        // 3. Conditional Setup based on Role
         if (user.email === ADMIN_EMAIL) {
             setupAdminPanel();
         } else {
-            // Listen for locks applied TO this user
             listenForRemoteLocks(user.email);
-            // UI Adjustments for non-admin
             adminLockPanel.style.display = 'none';
             userLockStatus.style.display = 'block';
         }
 
-        // 4. Start Auto-Sync for Guest List (15s)
         if(autoCheckInterval) clearInterval(autoCheckInterval);
         autoCheckInterval = setInterval(performSync, 15000);
 
@@ -228,20 +219,23 @@ onAuthStateChanged(auth, async (user) => {
         // --- LOGGED OUT ---
         currentUser = null;
         
-        // UI Transitions
         loadingScreen.style.display = 'none';
         loginOverlay.style.display = 'flex';
         appContent.style.display = 'none';
         
-        // Cleanup
+        // Cleanup all intervals and listeners
         if (heartbeatInterval) clearInterval(heartbeatInterval);
-        if (adminRefreshInterval) clearInterval(adminRefreshInterval);
+        if (adminUiRefreshInterval) clearInterval(adminUiRefreshInterval);
         if (ticketsUnsubscribe) ticketsUnsubscribe();
         if (settingsUnsubscribe) settingsUnsubscribe();
+        
+        // Unsubscribe all admin listeners
+        adminPresenceUnsubscribes.forEach(unsub => unsub());
+        adminPresenceUnsubscribes = [];
     }
 });
 
-// Login Button Action
+// Login Button
 loginButton.addEventListener('click', async () => {
     const email = emailInput.value;
     const password = passwordInput.value;
@@ -272,14 +266,13 @@ function showError(msg) {
     loginButton.disabled = false;
 }
 
-// Logout Button Action
+// Logout Button
 logoutBtn.addEventListener('click', () => {
     signOut(auth);
-    // Reloading ensures a clean state
     window.location.reload();
 });
 
-// Password Visibility Toggle
+// Password Toggle
 if (togglePassword && passwordInput) {
     togglePassword.addEventListener('click', function () {
         const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
@@ -291,52 +284,70 @@ if (togglePassword && passwordInput) {
 
 
 // ==========================================
-// 6. ADMIN DASHBOARD LOGIC
+// 6. INSTANT ADMIN DASHBOARD LOGIC (UPDATED)
 // ==========================================
 
 function setupAdminPanel() {
     adminLockPanel.style.display = 'block';
     userLockStatus.style.display = 'none';
     
-    // Initial fetch
-    updateManagedUsersList();
-    
-    // Refresh list every 10s to update Online/Offline status
-    if(adminRefreshInterval) clearInterval(adminRefreshInterval);
-    adminRefreshInterval = setInterval(updateManagedUsersList, 10000);
-}
+    // Clear old listeners if re-initializing
+    adminPresenceUnsubscribes.forEach(unsub => unsub());
+    adminPresenceUnsubscribes = [];
+    managedUsersDeviceCache = {};
 
-async function updateManagedUsersList() {
-    if (!currentUser || currentUser.email !== ADMIN_EMAIL) return;
-
-    let html = '';
-
-    for (const user of MANAGED_USERS) {
-        // Reads from the NEW path: /global_presence/{userEmail}/devices
+    // 1. Attach Real-time Listener for EACH user
+    MANAGED_USERS.forEach(user => {
         const devicesRef = collection(db, 'global_presence', user.email, 'devices');
         
-        let activeDevices = 0;
-        try {
-            const snap = await getDocs(devicesRef);
-            const now = Date.now();
-            
-            snap.forEach(doc => {
+        // This triggers INSTANTLY whenever any device document changes (heartbeat update)
+        const unsub = onSnapshot(devicesRef, (snapshot) => {
+            const timestamps = [];
+            snapshot.forEach(doc => {
                 const data = doc.data();
-                // Threshold: 30 seconds (Heartbeat runs every 10s)
-                if (now - data.lastSeen < 30000) {
-                    activeDevices++;
-                }
+                if(data.lastSeen) timestamps.push(data.lastSeen);
             });
-        } catch (e) { 
-            console.error(`Error checking status for ${user.email}:`, e); 
-        }
+            
+            // Update cache
+            managedUsersDeviceCache[user.email] = timestamps;
+            
+            // Re-render immediately
+            renderManagedUsersList();
+        });
+
+        adminPresenceUnsubscribes.push(unsub);
+    });
+
+    // 2. Set interval ONLY for local timeout check
+    // (If user disconnects abruptly, no DB write happens, so we need to locally check expiry)
+    if(adminUiRefreshInterval) clearInterval(adminUiRefreshInterval);
+    adminUiRefreshInterval = setInterval(renderManagedUsersList, 5000); // Check expiry every 5s
+    
+    // Initial Render
+    renderManagedUsersList();
+}
+
+function renderManagedUsersList() {
+    // Pure rendering function based on 'managedUsersDeviceCache'
+    if (!currentUser || currentUser.email !== ADMIN_EMAIL) return;
+    
+    let html = '';
+    const now = Date.now();
+
+    for (const user of MANAGED_USERS) {
+        const timestamps = managedUsersDeviceCache[user.email] || [];
+        
+        // Count how many devices have sent a heartbeat in the last 30 seconds
+        let activeDevices = 0;
+        timestamps.forEach(ts => {
+            if (now - ts < 30000) activeDevices++;
+        });
 
         const isOnline = activeDevices > 0;
         const statusClass = isOnline ? 'online' : '';
         const statusText = isOnline ? `Online • ${activeDevices} Device${activeDevices > 1 ? 's' : ''}` : 'Offline';
         const activeClass = (selectedUserForConfig === user.email) ? 'active-selection' : '';
 
-        // Add onclick handler string
         html += `
         <div class="user-card ${activeClass}" onclick="selectUserForConfig('${user.email}')">
             <div class="user-card-info">
@@ -350,7 +361,7 @@ async function updateManagedUsersList() {
         </div>
         `;
     }
-
+    
     managedUsersList.innerHTML = html;
 }
 
@@ -360,8 +371,8 @@ window.selectUserForConfig = async function(email) {
     selectedUserEmailSpan.textContent = email;
     userLockConfigArea.style.display = 'block';
     
-    // Refresh list to show active highlight
-    updateManagedUsersList(); 
+    // Refresh list to show active highlight immediately
+    renderManagedUsersList(); 
     
     // Reset checkboxes when switching users
     remoteLockCheckboxes.forEach(cb => cb.checked = false);
@@ -393,7 +404,6 @@ confirmAdminLock.addEventListener('click', async () => {
         if (cb.checked) lockedTabs.push(cb.value);
     });
 
-    // Write to NEW path: /global_locks/{userEmail}
     const lockRef = doc(db, 'global_locks', selectedUserForConfig);
     const originalText = confirmAdminLock.textContent;
     confirmAdminLock.textContent = "Syncing...";
@@ -409,7 +419,7 @@ confirmAdminLock.addEventListener('click', async () => {
         adminLockModal.style.display = 'none';
     } catch (e) {
         console.error("Lock sync failed:", e);
-        alert("Failed to sync locks. Check console for details.");
+        alert("Failed to sync locks. Check permissions.");
     } finally {
         confirmAdminLock.textContent = originalText;
     }
@@ -421,7 +431,6 @@ confirmAdminLock.addEventListener('click', async () => {
 // ==========================================
 
 function listenForRemoteLocks(userEmail) {
-    // Listen to NEW path: /global_locks/{userEmail}
     const lockRef = doc(db, 'global_locks', userEmail);
     
     onSnapshot(lockRef, (doc) => {
@@ -429,7 +438,6 @@ function listenForRemoteLocks(userEmail) {
             const data = doc.data();
             applyRemoteLocks(data.lockedTabs || []);
         } else {
-            // Document doesn't exist implies no locks
             applyRemoteLocks([]); 
         }
     });
@@ -448,11 +456,10 @@ function applyRemoteLocks(tabsToLock) {
         if(btn) btn.classList.add('locked');
     });
 
-    // 3. Security Kick: If user is currently on a locked tab, move them
+    // 3. Security Kick
     const currentActive = document.querySelector('.nav-btn.active');
     if (currentActive && tabsToLock.includes(currentActive.dataset.tab)) {
         const allTabs = ['create', 'booked', 'scanner', 'settings'];
-        // Find first tab that isn't locked
         const safeTab = allTabs.find(t => !tabsToLock.includes(t));
         
         if (safeTab) {
@@ -460,7 +467,6 @@ function applyRemoteLocks(tabsToLock) {
             showToast("Access Restricted", "Administrator has locked this tab.");
             playError();
         } else {
-            // If everything is locked, force to Settings (usually safe)
             document.querySelector('[data-tab="settings"]').click();
         }
     }
@@ -507,7 +513,6 @@ function showToast(title, msg) {
 function playBeep() {
     const audio = new Audio('success.mp3');
     audio.play().catch(() => {
-        // Fallback Oscillator
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
         const osc = ctx.createOscillator();
         osc.connect(ctx.destination);
@@ -520,7 +525,6 @@ function playBeep() {
 function playError() {
     const audio = new Audio('error.mp3');
     audio.play().catch(() => {
-        // Fallback Oscillator
         const ctx = new (window.AudioContext || window.webkitAudioContext)();
         const osc = ctx.createOscillator();
         osc.type = 'sawtooth';
@@ -536,7 +540,6 @@ function playError() {
 // 9. APP NAVIGATION & DATA SYNC
 // ==========================================
 
-// Nav Button Click Logic
 navButtons.forEach(button => {
     button.addEventListener('click', (e) => {
         const targetTab = button.dataset.tab;
@@ -549,12 +552,10 @@ navButtons.forEach(button => {
             return;
         }
 
-        // Camera Cleanup
         if (scannerVideo.srcObject && button.dataset.tab !== 'scanner') {
             stopScan();
         }
 
-        // Switch Active Class
         navButtons.forEach(btn => btn.classList.remove('active'));
         button.classList.add('active');
 
@@ -567,7 +568,6 @@ navButtons.forEach(button => {
     });
 });
 
-// Setup Realtime Listeners for Ticket Data
 function setupRealtimeListeners(userId) {
     const ticketsRef = collection(db, APP_COLLECTION_ROOT, userId, 'tickets');
     const q = query(ticketsRef);
@@ -589,7 +589,6 @@ function setupRealtimeListeners(userId) {
     });
 }
 
-// Manual Sync Function
 async function performSync() {
     if(!currentUser) return;
     const icon = refreshStatusIndicator.querySelector('i');
@@ -676,7 +675,6 @@ function updateTicketPreview(ticket) {
     whatsappBtn.disabled = false;
 }
 
-// WhatsApp Share (Main Ticket)
 whatsappBtn.addEventListener('click', () => {
     const btn = whatsappBtn;
     const originalText = btn.textContent;
@@ -693,25 +691,22 @@ whatsappBtn.addEventListener('click', () => {
         useCORS: true
     }).then(canvas => {
         ticketTemplate.style.border = originalBorder;
-
         const now = new Date();
         const pad = (num) => String(num).padStart(2, '0');
         const timestamp = `${pad(now.getDate())}${pad(now.getMonth() + 1)}${now.getFullYear()}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        
         const link = document.createElement('a');
         link.download = `ticket-${timestamp}.png`;
         link.href = canvas.toDataURL('image/png');
         document.body.appendChild(link);
         link.click();
         document.body.removeChild(link);
-
+        
         setTimeout(() => {
             const phone = document.getElementById('ticketPhone').textContent.replace(/\D/g,'');
             const name = document.getElementById('ticketName').textContent;
             const message = encodeURIComponent(`Hello ${name}, here is your Entry Pass 🎫.\n*Keep this QR code ready at the entrance.*`);
             window.location.href = `https://wa.me/${phone}?text=${message}`;
             
-            // Reset
             btn.textContent = originalText;
             btn.disabled = true;
             document.getElementById('ticketName').textContent = '--';
@@ -733,13 +728,11 @@ whatsappBtn.addEventListener('click', () => {
 function renderBookedTickets() {
     bookedTicketsTable.innerHTML = '';
     
-    // Toggle Selection Header
     const checkHeader = document.querySelector('.tickets-table thead th:first-child');
     if(checkHeader) {
         checkHeader.style.display = isSelectionMode ? 'table-cell' : 'none';
     }
 
-    // Filter
     let displayTickets = bookedTickets.filter(ticket => {
         const matchesSearch = ticket.name.toLowerCase().includes(searchTerm) || ticket.phone.includes(searchTerm);
         if (!matchesSearch) return false;
@@ -748,7 +741,6 @@ function renderBookedTickets() {
         return true;
     });
 
-    // Sort
     displayTickets.sort((a, b) => {
         if (currentSort === 'newest') return b.createdAt - a.createdAt;
         if (currentSort === 'oldest') return a.createdAt - b.createdAt;
@@ -793,7 +785,6 @@ function renderBookedTickets() {
         bookedTicketsTable.appendChild(tr);
     });
 
-    // Wire up events for dynamically created elements
     document.querySelectorAll('.view-ticket-btn').forEach(btn => {
         btn.addEventListener('click', (e) => {
             const ticket = bookedTickets.find(t => t.id === e.target.dataset.id);
@@ -811,7 +802,6 @@ function renderBookedTickets() {
     });
 }
 
-// Search & Filter Events
 searchInput.addEventListener('input', (e) => {
     searchTerm = e.target.value.toLowerCase().trim();
     renderBookedTickets();
@@ -831,14 +821,11 @@ document.querySelectorAll('.dropdown-item').forEach(item => {
         e.stopPropagation();
         const type = item.dataset.type;
         const val = item.dataset.val;
-        
         document.querySelectorAll(`.dropdown-item[data-type="${type}"]`).forEach(el => el.classList.remove('selected'));
         item.classList.add('selected');
-
         if(type === 'filter') currentFilter = val;
         if(type === 'filter-gender') currentGenderFilter = val;
         if(type === 'sort') currentSort = val;
-
         renderBookedTickets();
         filterDropdown.classList.remove('show');
     });
@@ -853,11 +840,8 @@ function updateSelectionCount() {
     const count = selectedTicketIds.size;
     selectionCountSpan.textContent = `(${count} selected)`;
     exportTriggerBtn.disabled = count === 0;
-    
-    // Check if everything visible is selected
     const allVisibleSelected = currentFilteredTickets.length > 0 && 
                                currentFilteredTickets.every(t => selectedTicketIds.has(t.id));
-    
     if(currentFilteredTickets.length === 0) selectAllCheckbox.checked = false;
     else selectAllCheckbox.checked = allVisibleSelected;
 }
@@ -908,7 +892,7 @@ confirmDeleteBtn.addEventListener('click', async () => {
         confirmDeleteBtn.textContent = "Delete";
         pendingDeleteIds = [];
         selectedTicketIds.clear(); 
-        selectBtn.click(); // Exit selection mode
+        selectBtn.click(); 
     }
 });
 
@@ -950,7 +934,6 @@ confirmExportBtn.addEventListener('click', () => {
     showToast("Export Complete", `${listToExport.length} records saved.`);
 });
 
-// Export Helpers
 function downloadFile(uri, filename) {
     const link = document.createElement("a");
     link.href = uri;
@@ -1294,3 +1277,5 @@ if ("serviceWorker" in navigator) {
         navigator.serviceWorker.register("/service-worker.js").catch(err => console.log("SW failed:", err));
     });
 }
+
+
