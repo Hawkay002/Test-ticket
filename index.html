@@ -374,9 +374,14 @@
 
                     <!-- NEW ADMIN DEVICE MANAGEMENT PANEL -->
                     <div id="adminPanel" style="margin-top: 40px; display: none;">
-                        <h3 style="font-size: 1.2rem; margin-bottom: 15px; color: white; border-bottom: 1px solid var(--border-subtle); padding-bottom: 10px;">
-                            <i class="fa-solid fa-users-gear"></i> Device Management
-                        </h3>
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
+                            <h3 style="font-size: 1.2rem; color: white; border-bottom: 1px solid var(--border-subtle); padding-bottom: 10px;">
+                                <i class="fa-solid fa-users-gear"></i> Device Management
+                            </h3>
+                            <button id="refreshDevicesBtn" class="action-btn-small" style="display: flex; align-items: center; gap: 6px; font-size: 0.8rem;">
+                                <i class="fa-solid fa-arrows-rotate"></i> Refresh
+                            </button>
+                        </div>
                         
                         <div id="connectedDevicesList" style="margin-bottom: 20px; max-height: 300px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 12px; padding: 15px;">
                             <div style="text-align: center; color: #666; padding: 20px;">
