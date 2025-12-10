@@ -1282,6 +1282,26 @@ tr:hover td {
     color: white !important;
 }
 
+#refreshDevicesBtn {
+    background: rgba(59, 130, 246, 0.1);
+    color: var(--accent-secondary);
+    border: 1px solid rgba(59, 130, 246, 0.3);
+}
+
+#refreshDevicesBtn:hover {
+    background: rgba(59, 130, 246, 0.3);
+    color: white;
+}
+
+#refreshDevicesBtn.refreshing {
+    pointer-events: none;
+    opacity: 0.7;
+}
+
+#refreshDevicesBtn.refreshing i {
+    animation: spin 1s linear infinite;
+}
+
 .shake {
     animation: shake 0.5s cubic-bezier(.36,.07,.19,.97) both;
 }
@@ -1291,6 +1311,54 @@ tr:hover td {
     20%, 80% { transform: translate3d(2px, 0, 0); }
     30%, 50%, 70% { transform: translate3d(-4px, 0, 0); }
     40%, 60% { transform: translate3d(4px, 0, 0); }
+}
+
+/* Device Stats */
+.device-stats {
+    display: flex;
+    gap: 15px;
+    margin-bottom: 15px;
+    flex-wrap: wrap;
+}
+
+.stat-card {
+    background: rgba(255, 255, 255, 0.03);
+    border: 1px solid var(--border-subtle);
+    border-radius: 10px;
+    padding: 12px 15px;
+    flex: 1;
+    min-width: 120px;
+}
+
+.stat-value {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: white;
+    display: block;
+}
+
+.stat-label {
+    font-size: 0.8rem;
+    color: #888;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.stat-online {
+    color: #10b981;
+}
+
+.stat-offline {
+    color: #ef4444;
+}
+
+/* Last Refresh Time */
+.last-refresh-time {
+    font-size: 0.75rem;
+    color: #666;
+    text-align: center;
+    margin-top: 10px;
+    font-style: italic;
 }
 
 /* Responsive adjustments */
@@ -1307,5 +1375,13 @@ tr:hover td {
     .lock-device-btn {
         width: 100%;
         margin-top: 10px;
+    }
+    
+    .device-stats {
+        flex-direction: column;
+    }
+    
+    .stat-card {
+        width: 100%;
     }
 }
