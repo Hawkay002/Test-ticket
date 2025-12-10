@@ -24,7 +24,7 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 const APP_COLLECTION_ROOT = 'ticket_events_data';
-const ADMIN_EMAIL = "admin.test@gmail.com"; // Your admin email
+const ADMIN_EMAIL = "admin.test@gmail.com";
 
 let currentUser = null;
 let ticketsUnsubscribe = null;
@@ -244,6 +244,21 @@ async function loadAllUserSessions() {
         
     } catch (error) {
         console.error("Error loading sessions:", error);
+        
+        // Check if it's a permissions error
+        if (error.code === 'permission-denied') {
+            console.warn("Admin doesn't have permission to view other users' data");
+            const container = document.getElementById('connectedDevicesList');
+            if (container) {
+                container.innerHTML = `
+                    <div style="text-align: center; color: #ef4444; padding: 20px;">
+                        <i class="fa-solid fa-triangle-exclamation"></i>
+                        <p style="margin-top: 10px;">Admin permissions required to view connected devices.</p>
+                        <p style="font-size: 0.8rem; color: #888;">Update Firestore rules to allow admin access.</p>
+                    </div>
+                `;
+            }
+        }
     }
 }
 
@@ -262,7 +277,7 @@ function renderConnectedDevices() {
     
     container.innerHTML = allUsersSessions.map((session, index) => {
         const timeAgo = getTimeAgo(session.lastActive);
-        const isOnline = (Date.now() - session.lastActive.getTime()) < 60000; // 1 minute threshold
+        const isOnline = (Date.now() - session.lastActive.getTime()) < 60000;
         
         return `
             <div class="device-card" data-user-id="${session.userId}" data-session-id="${session.sessionId}" 
@@ -1105,7 +1120,6 @@ if (confirmExportBtn) {
     });
 }
 
-// Export functions (same as before, but with safety checks)
 function exportCSV(data, filename) {
     let csvContent = "data:text/csv;charset=utf-8,";
     csvContent += "S.No.,Guest Name,Age,Gender,Phone,Status,Ticket ID,Entry Time\n";
@@ -1272,14 +1286,14 @@ navButtons.forEach(button => {
                     unlockModal.style.display = 'flex';
                     if (unlockPasswordInput) unlockPasswordInput.focus();
                 }
-                return; // Stop navigation
+                return;
             }
             
             // Case 2: Clicking a specifically locked tab
             if (localLockState.lockedTabs.includes(targetTab)) {
                 e.preventDefault();
                 showToast("Access Denied", "This tab is locked on this device.");
-                return; // Stop navigation
+                return;
             }
         }
 
