@@ -1,6 +1,10 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
 import { getAuth, signInWithEmailAndPassword, onAuthStateChanged, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-import { getFirestore, collection, doc, setDoc, addDoc, onSnapshot, getDocs, query, deleteDoc, updateDoc, getDoc } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+import { 
+    getFirestore, collection, doc, setDoc, addDoc, onSnapshot, 
+    getDocs, query, deleteDoc, updateDoc, getDoc, serverTimestamp, 
+    where, orderBy 
+} from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
 // ==========================================
 // FIREBASE CONFIGURATION
@@ -20,30 +24,48 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 
 const APP_COLLECTION_ROOT = 'ticket_events_data';
-const DIRECTORY_PATH = '_directory'; // Special collection for user discovery
-const ADMIN_EMAIL = 'admin.test@gmail.com';
+const ADMIN_EMAIL = "admin.test@gmail.com"; // Your admin email
 
 let currentUser = null;
 let ticketsUnsubscribe = null;
 let settingsUnsubscribe = null;
 let securityUnsubscribe = null;
-let adminDirectoryUnsubscribe = null; // Listener for Admin
+let remoteLockUnsubscribe = null;
 let autoCheckInterval = null;
-let heartbeatInterval = null;
+
+// ==========================================
+// SESSION & DEVICE TRACKING
+// ==========================================
+let currentSessionId = null;
 
 // --- SECURITY STATE ---
-// globalPassword comes from DB (Synced across devices)
-let globalPassword = ""; 
-// localLockState comes from LocalStorage (Device specific)
+let globalPassword = "";
 let localLockState = {
     isLocked: false,
     lockedTabs: []
 };
 
-// --- STATE MANAGEMENT FOR SELECTIONS ---
-let selectedTicketIds = new Set(); 
+// --- STATE MANAGEMENT ---
+let selectedTicketIds = new Set();
+let bookedTickets = [];
+let eventSettings = { name: '', place: '', deadline: '' };
 
-// --- BACKGROUND STARS LOGIC ---
+// --- ADMIN STATE ---
+let allUsersSessions = [];
+let selectedUserForLock = null;
+
+// --- SEARCH & FILTER STATE ---
+let searchTerm = '';
+let currentFilter = 'all';
+let currentGenderFilter = 'all';
+let currentSort = 'newest';
+let currentFilteredTickets = [];
+
+// ==========================================
+// INITIALIZATION FUNCTIONS
+// ==========================================
+
+// Star Background
 function createStars() {
     const container = document.getElementById('star-container');
     const numberOfStars = 100;
@@ -60,16 +82,13 @@ function createStars() {
         container.appendChild(star);
     }
 }
-createStars(); 
+createStars();
 
-// --- SEARCH & FILTER STATE ---
-let searchTerm = '';
-let currentFilter = 'all'; 
-let currentGenderFilter = 'all';
-let currentSort = 'newest';
-let currentFilteredTickets = []; 
+// ==========================================
+// UTILITY FUNCTIONS
+// ==========================================
 
-// --- TOAST NOTIFICATIONS ---
+// Toast Notifications
 function showToast(title, msg) {
     const container = document.getElementById('toast-container');
     const toast = document.createElement('div');
@@ -77,7 +96,7 @@ function showToast(title, msg) {
     toast.innerHTML = `
         <div class="toast-title">${title}</div>
         <div class="toast-msg">${msg}</div>
-        <div class="toast-note">System Notification</div>
+        <div class="toast-note">Tip: Check Configuration for settings.</div>
     `;
     container.appendChild(toast);
     
@@ -87,7 +106,425 @@ function showToast(title, msg) {
     }, 5000);
 }
 
-// --- DOM ELEMENTS ---
+// Connection Status
+function updateOnlineStatus() {
+    const syncDot = document.querySelector('.sync-dot');
+    if (!syncDot) return;
+
+    if (navigator.onLine) {
+        syncDot.classList.remove('offline');
+    } else {
+        syncDot.classList.add('offline');
+        showToast('Connection Lost', 'You are currently offline.');
+    }
+}
+
+window.addEventListener('online', () => {
+    updateOnlineStatus();
+    showToast('Back Online', 'Connection restored.');
+    performSync();
+});
+window.addEventListener('offline', updateOnlineStatus);
+
+// ==========================================
+// SESSION MANAGEMENT
+// ==========================================
+
+function initSessionTracking(userId) {
+    currentSessionId = `session_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    
+    // Store user email for admin lookup
+    storeUserEmail(userId, currentUser.email);
+    
+    // Store session info
+    const sessionRef = doc(db, APP_COLLECTION_ROOT, userId, 'sessions', currentSessionId);
+    setDoc(sessionRef, {
+        email: currentUser.email,
+        lastActive: serverTimestamp(),
+        isActive: true,
+        deviceInfo: getDeviceInfo(),
+        userAgent: navigator.userAgent
+    }, { merge: true });
+    
+    // Update session activity every 30 seconds
+    const sessionInterval = setInterval(() => {
+        if (currentUser) {
+            updateDoc(sessionRef, {
+                lastActive: serverTimestamp(),
+                isActive: true
+            });
+        } else {
+            clearInterval(sessionInterval);
+        }
+    }, 30000);
+}
+
+function cleanupSession(userId) {
+    if (currentSessionId && userId) {
+        const sessionRef = doc(db, APP_COLLECTION_ROOT, userId, 'sessions', currentSessionId);
+        updateDoc(sessionRef, {
+            isActive: false,
+            endedAt: serverTimestamp()
+        }).catch(() => {});
+    }
+}
+
+function getDeviceInfo() {
+    return {
+        platform: navigator.platform,
+        language: navigator.language,
+        screen: `${window.screen.width}x${window.screen.height}`,
+        online: navigator.onLine,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
+    };
+}
+
+async function storeUserEmail(userId, email) {
+    try {
+        await setDoc(doc(db, 'user_emails', userId), {
+            email: email,
+            lastLogin: serverTimestamp()
+        }, { merge: true });
+    } catch (error) {
+        console.error("Error storing email:", error);
+    }
+}
+
+// ==========================================
+// ADMIN FUNCTIONS
+// ==========================================
+
+function isAdmin() {
+    return currentUser && currentUser.email === ADMIN_EMAIL;
+}
+
+async function loadAllUserSessions() {
+    if (!isAdmin() || !currentUser) return;
+    
+    try {
+        // Get all users collection
+        const usersSnapshot = await getDocs(collection(db, APP_COLLECTION_ROOT));
+        allUsersSessions = [];
+        
+        for (const userDoc of usersSnapshot.docs) {
+            const userId = userDoc.id;
+            
+            // Skip current admin user
+            if (userId === currentUser.uid) continue;
+            
+            // Get user's email
+            let userEmail = `User_${userId.substring(0, 8)}`;
+            try {
+                const emailDoc = await getDoc(doc(db, 'user_emails', userId));
+                if (emailDoc.exists()) {
+                    userEmail = emailDoc.data().email;
+                }
+            } catch (e) {
+                console.log("Could not fetch email for user:", userId);
+            }
+            
+            // Get active sessions
+            const sessionsRef = collection(db, APP_COLLECTION_ROOT, userId, 'sessions');
+            const sessionsSnapshot = await getDocs(query(sessionsRef, where('isActive', '==', true)));
+            
+            sessionsSnapshot.forEach(sessionDoc => {
+                const sessionData = sessionDoc.data();
+                allUsersSessions.push({
+                    userId,
+                    userEmail,
+                    sessionId: sessionDoc.id,
+                    lastActive: sessionData.lastActive?.toDate() || new Date(),
+                    deviceInfo: sessionData.deviceInfo || {},
+                    userAgent: sessionData.userAgent || 'Unknown'
+                });
+            });
+        }
+        
+        renderConnectedDevices();
+        
+    } catch (error) {
+        console.error("Error loading sessions:", error);
+    }
+}
+
+function renderConnectedDevices() {
+    const container = document.getElementById('connectedDevicesList');
+    if (!container) return;
+    
+    if (allUsersSessions.length === 0) {
+        container.innerHTML = `
+            <div style="text-align: center; color: #666; padding: 20px;">
+                <i class="fa-solid fa-user-slash"></i> No other devices connected
+            </div>
+        `;
+        return;
+    }
+    
+    container.innerHTML = allUsersSessions.map((session, index) => {
+        const timeAgo = getTimeAgo(session.lastActive);
+        const isOnline = (Date.now() - session.lastActive.getTime()) < 60000; // 1 minute threshold
+        
+        return `
+            <div class="device-card" data-user-id="${session.userId}" data-session-id="${session.sessionId}" 
+                 style="background: ${isOnline ? 'rgba(16, 185, 129, 0.05)' : 'rgba(239, 68, 68, 0.05)'}; 
+                        border: 1px solid ${isOnline ? 'rgba(16, 185, 129, 0.2)' : 'rgba(239, 68, 68, 0.2)'}; 
+                        border-radius: 10px; padding: 15px; margin-bottom: 10px; cursor: pointer; transition: all 0.3s;">
+                <div style="display: flex; justify-content: space-between; align-items: center;">
+                    <div style="flex: 1;">
+                        <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 5px;">
+                            <i class="fa-solid fa-laptop" style="color: ${isOnline ? '#10b981' : '#ef4444'};"></i>
+                            <span style="font-weight: 500; color: white;">${session.userEmail}</span>
+                            <span class="status-badge" style="background: ${isOnline ? 'rgba(16, 185, 129, 0.1)' : 'rgba(239, 68, 68, 0.1)'}; 
+                                        color: ${isOnline ? '#10b981' : '#ef4444'}; font-size: 0.7rem;">
+                                ${isOnline ? 'Online' : 'Offline'}
+                            </span>
+                        </div>
+                        <div style="font-size: 0.75rem; color: #888;">
+                            <div>${session.deviceInfo.platform || 'Unknown device'} • ${session.deviceInfo.screen || 'Unknown screen'}</div>
+                            <div>Last active: ${timeAgo}</div>
+                        </div>
+                    </div>
+                    <div>
+                        <button class="action-btn-small lock-device-btn" style="font-size: 0.8rem;">
+                            <i class="fa-solid fa-lock"></i> Manage
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+    }).join('');
+    
+    // Add event listeners to device cards
+    document.querySelectorAll('.device-card').forEach(card => {
+        const lockBtn = card.querySelector('.lock-device-btn');
+        if (lockBtn) {
+            lockBtn.addEventListener('click', (e) => {
+                e.stopPropagation();
+                const userId = card.dataset.userId;
+                const userEmail = card.querySelector('span[style*="font-weight: 500"]').textContent;
+                showAdminLockControls(userId, userEmail);
+            });
+        }
+    });
+}
+
+function getTimeAgo(date) {
+    const seconds = Math.floor((Date.now() - date.getTime()) / 1000);
+    
+    if (seconds < 60) return 'just now';
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`;
+    if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`;
+    return `${Math.floor(seconds / 86400)}d ago`;
+}
+
+function showAdminLockControls(userId, userEmail) {
+    selectedUserForLock = userId;
+    document.getElementById('targetUserEmail').textContent = userEmail;
+    document.getElementById('adminLockControls').style.display = 'block';
+    
+    // Scroll to controls
+    document.getElementById('adminLockControls').scrollIntoView({ behavior: 'smooth' });
+}
+
+function hideAdminLockControls() {
+    selectedUserForLock = null;
+    document.getElementById('adminLockControls').style.display = 'none';
+    document.querySelectorAll('.admin-lock-checkbox').forEach(cb => cb.checked = false);
+    document.getElementById('adminLockPassword').value = '';
+}
+
+async function applyAdminLockToUser() {
+    if (!selectedUserForLock || !isAdmin()) return;
+    
+    const password = document.getElementById('adminLockPassword').value;
+    if (!password) {
+        alert("Please enter a lock password");
+        return;
+    }
+    
+    const tabsToLock = [];
+    document.querySelectorAll('.admin-lock-checkbox:checked').forEach(cb => {
+        tabsToLock.push(cb.value);
+    });
+    
+    if (tabsToLock.length === 0) {
+        alert("Please select at least one tab to lock");
+        return;
+    }
+    
+    try {
+        // Store the lock command in target user's security collection
+        const lockCommandRef = doc(db, APP_COLLECTION_ROOT, selectedUserForLock, 'security', 'remote_lock');
+        
+        await setDoc(lockCommandRef, {
+            isLocked: true,
+            lockedTabs: tabsToLock,
+            password: password,
+            lockedBy: currentUser.email,
+            lockedAt: serverTimestamp(),
+            commandId: `lock_${Date.now()}`
+        }, { merge: true });
+        
+        showToast("Lock Command Sent", `Tabs locked for user in real-time`);
+        hideAdminLockControls();
+        
+    } catch (error) {
+        console.error("Error applying lock:", error);
+        alert("Failed to apply lock");
+    }
+}
+
+function setupRemoteLockListener(userId) {
+    if (remoteLockUnsubscribe) remoteLockUnsubscribe();
+    
+    const remoteLockRef = doc(db, APP_COLLECTION_ROOT, userId, 'security', 'remote_lock');
+    
+    remoteLockUnsubscribe = onSnapshot(remoteLockRef, (docSnap) => {
+        if (docSnap.exists()) {
+            const lockData = docSnap.data();
+            
+            // Apply the remote lock locally
+            localLockState = {
+                isLocked: lockData.isLocked || false,
+                lockedTabs: lockData.lockedTabs || []
+            };
+            
+            // Update global password if provided
+            if (lockData.password) {
+                globalPassword = lockData.password;
+            }
+            
+            saveLocalSecurityState();
+            applySecurityLocks();
+            
+            showToast("Remote Lock Applied", "Admin has locked tabs on this device");
+        }
+    });
+}
+
+// ==========================================
+// SECURITY FUNCTIONS
+// ==========================================
+
+function loadLocalSecurityState(userId) {
+    const stored = localStorage.getItem(`ticketApp_lockState_${userId}`);
+    if (stored) {
+        localLockState = JSON.parse(stored);
+    } else {
+        localLockState = { isLocked: false, lockedTabs: [] };
+    }
+}
+
+function saveLocalSecurityState() {
+    if (currentUser) {
+        localStorage.setItem(`ticketApp_lockState_${currentUser.uid}`, JSON.stringify(localLockState));
+    }
+}
+
+function applySecurityLocks() {
+    const { isLocked, lockedTabs } = localLockState;
+    const allNavs = document.querySelectorAll('.nav-btn');
+
+    // Reset visual state
+    allNavs.forEach(btn => {
+        btn.classList.remove('locked');
+    });
+
+    if (isLocked) {
+        // Mark Configuration as locked visually
+        const settingsBtn = document.querySelector('[data-tab="settings"]');
+        if (settingsBtn) settingsBtn.classList.add('locked');
+        
+        // Mark selected tabs as locked visually
+        lockedTabs.forEach(tabName => {
+            const btn = document.querySelector(`[data-tab="${tabName}"]`);
+            if (btn) btn.classList.add('locked');
+        });
+
+        // Update Lock Controls UI
+        if (lockSystemBtn) {
+            lockSystemBtn.innerHTML = '<i class="fa-solid fa-lock"></i> Locked';
+            lockSystemBtn.classList.add('active');
+        }
+        
+        // Fill checkboxes based on state & disable them
+        lockCheckboxes.forEach(cb => {
+            cb.checked = lockedTabs.includes(cb.value);
+            cb.disabled = true;
+        });
+        
+        if (lockPasswordInput) {
+            lockPasswordInput.disabled = true;
+            lockPasswordInput.value = '';
+        }
+        
+        if (lockSystemBtn) lockSystemBtn.disabled = true;
+    } else {
+        // Unlocked State
+        lockCheckboxes.forEach(cb => {
+            cb.disabled = false;
+        });
+        
+        if (lockPasswordInput) {
+            lockPasswordInput.disabled = false;
+        }
+        
+        if (lockSystemBtn) {
+            lockSystemBtn.disabled = false;
+            lockSystemBtn.innerHTML = '<i class="fa-solid fa-lock"></i> Lock Tabs';
+            lockSystemBtn.classList.remove('active');
+        }
+    }
+}
+
+// ==========================================
+// SYNC & REFRESH FUNCTIONS
+// ==========================================
+
+async function performSync() {
+    if (!currentUser) return;
+    
+    const icon = refreshStatusIndicator?.querySelector('i');
+    if (icon) {
+        icon.classList.add('fa-spin');
+        icon.style.color = 'var(--accent-secondary)';
+    }
+    
+    const startTime = Date.now();
+    try {
+        const ticketsRef = collection(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets');
+        const q = query(ticketsRef);
+        const snapshot = await getDocs(q);
+        bookedTickets = [];
+        snapshot.forEach((doc) => {
+            bookedTickets.push({ id: doc.id, ...doc.data() });
+        });
+        await checkAutoAbsent();
+        renderBookedTickets();
+        
+        // Refresh admin device list if admin
+        if (isAdmin()) {
+            loadAllUserSessions();
+        }
+    } catch (err) {
+        console.error("Auto-sync error:", err);
+    } finally {
+        const elapsed = Date.now() - startTime;
+        const remaining = Math.max(0, 1000 - elapsed);
+        setTimeout(() => {
+            if (icon) {
+                icon.classList.remove('fa-spin');
+                icon.style.color = '';
+            }
+        }, remaining);
+    }
+}
+
+// ==========================================
+// EVENT LISTENERS SETUP
+// ==========================================
+
+// DOM Elements
 const loginOverlay = document.getElementById('login-overlay');
 const loadingScreen = document.getElementById('loading-screen');
 const appContent = document.getElementById('appContent');
@@ -106,28 +543,19 @@ const cancelDeleteBtn = document.getElementById('cancelDelete');
 const confirmDeleteBtn = document.getElementById('confirmDelete');
 let pendingDeleteIds = [];
 
-// Lock Modal Elements (Local)
+// Lock Modal Elements
 const unlockModal = document.getElementById('unlock-modal');
 const unlockPasswordInput = document.getElementById('unlockPasswordInput');
 const unlockError = document.getElementById('unlock-error');
 const cancelUnlockBtn = document.getElementById('cancelUnlock');
 const confirmUnlockBtn = document.getElementById('confirmUnlock');
 
-// Admin Lock Modal (Remote)
-const adminLockModal = document.getElementById('admin-lock-modal');
-const adminLockPassword = document.getElementById('adminLockPassword');
-const toggleAdminLockPass = document.getElementById('toggleAdminLockPass');
-const cancelAdminLockBtn = document.getElementById('cancelAdminLock');
-const applyAdminLockBtn = document.getElementById('applyAdminLock');
-const adminTargetUserSpan = document.getElementById('adminTargetUser');
-let currentAdminTargetUid = null;
-
 // Ticket View Modal Elements
 const ticketViewModal = document.getElementById('ticket-view-modal');
 const closeTicketModal = document.getElementById('closeTicketModal');
 const modalWhatsAppBtn = document.getElementById('modalWhatsAppBtn');
 
-// Security Setting Elements (Local)
+// Security Setting Elements
 const lockPasswordInput = document.getElementById('lockSettingPassword');
 const toggleLockPassword = document.getElementById('toggleLockPassword');
 const lockSystemBtn = document.getElementById('lockSystemBtn');
@@ -150,80 +578,59 @@ const filterDropdown = document.getElementById('filterDropdown');
 // Refresh Icon
 const refreshStatusIndicator = document.getElementById('refreshStatusIndicator');
 
-// --- PASSWORD TOGGLE LOGIC ---
-function setupPasswordToggle(toggleId, inputId) {
-    const toggle = document.getElementById(toggleId);
-    const input = document.getElementById(inputId);
-    if (toggle && input) {
-        toggle.addEventListener('click', function () {
-            const type = input.getAttribute('type') === 'password' ? 'text' : 'password';
-            input.setAttribute('type', type);
-            this.classList.toggle('fa-eye');
-            this.classList.toggle('fa-eye-slash');
-        });
-    }
-}
-setupPasswordToggle('togglePassword', 'passwordInput');
-setupPasswordToggle('toggleLockPassword', 'lockSettingPassword');
-setupPasswordToggle('toggleAdminLockPass', 'adminLockPassword');
+// Admin Elements
+const adminPanel = document.getElementById('adminPanel');
+const cancelAdminLockBtn = document.getElementById('cancelAdminLock');
+const applyAdminLockBtn = document.getElementById('applyAdminLock');
+const toggleAdminPassword = document.getElementById('toggleAdminPassword');
+const adminLockPassword = document.getElementById('adminLockPassword');
 
-
-// --- CONNECTION STATUS ---
-function updateOnlineStatus() {
-    const syncDot = document.querySelector('.sync-dot');
-    if (!syncDot) return;
-
-    if (navigator.onLine) {
-        syncDot.classList.remove('offline');
-    } else {
-        syncDot.classList.add('offline');
-        showToast('Connection Lost', 'You are currently offline.');
-    }
+// Password Toggle Logic
+if (togglePassword && passwordInput) {
+    togglePassword.addEventListener('click', function () {
+        const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+        passwordInput.setAttribute('type', type);
+        this.classList.toggle('fa-eye');
+        this.classList.toggle('fa-eye-slash');
+    });
 }
 
-window.addEventListener('online', () => {
-    updateOnlineStatus();
-    showToast('Back Online', 'Connection restored.');
-    performSync(); 
-});
-window.addEventListener('offline', updateOnlineStatus);
-updateOnlineStatus();
-
-// --- REFRESH / SYNC LOGIC ---
-async function performSync() {
-    if(!currentUser) return;
-    const icon = refreshStatusIndicator.querySelector('i');
-    if(icon) {
-        icon.classList.add('fa-spin');
-        icon.style.color = 'var(--accent-secondary)'; 
-    }
-    const startTime = Date.now();
-    try {
-        const ticketsRef = collection(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets');
-        const q = query(ticketsRef);
-        const snapshot = await getDocs(q);
-        bookedTickets = [];
-        snapshot.forEach((doc) => {
-            bookedTickets.push({ id: doc.id, ...doc.data() });
-        });
-        await checkAutoAbsent();
-        renderBookedTickets();
-    } catch (err) {
-        console.error("Auto-sync error:", err);
-    } finally {
-        const elapsed = Date.now() - startTime;
-        const remaining = Math.max(0, 1000 - elapsed);
-        setTimeout(() => {
-            if(icon) {
-                icon.classList.remove('fa-spin');
-                icon.style.color = ''; 
-            }
-        }, remaining);
-    }
+if (toggleLockPassword && lockPasswordInput) {
+    toggleLockPassword.addEventListener('click', function () {
+        const type = lockPasswordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+        lockPasswordInput.setAttribute('type', type);
+        this.classList.toggle('fa-eye');
+        this.classList.toggle('fa-eye-slash');
+    });
 }
-refreshStatusIndicator.addEventListener('click', performSync);
 
-// --- AUTH STATE LISTENER ---
+if (toggleAdminPassword && adminLockPassword) {
+    toggleAdminPassword.addEventListener('click', function () {
+        const type = adminLockPassword.getAttribute('type') === 'password' ? 'text' : 'password';
+        adminLockPassword.setAttribute('type', type);
+        this.classList.toggle('fa-eye');
+        this.classList.toggle('fa-eye-slash');
+    });
+}
+
+// Refresh Status Indicator
+if (refreshStatusIndicator) {
+    refreshStatusIndicator.addEventListener('click', performSync);
+}
+
+// Admin Controls
+if (cancelAdminLockBtn) {
+    cancelAdminLockBtn.addEventListener('click', hideAdminLockControls);
+}
+
+if (applyAdminLockBtn) {
+    applyAdminLockBtn.addEventListener('click', applyAdminLockToUser);
+}
+
+// ==========================================
+// AUTHENTICATION
+// ==========================================
+
 onAuthStateChanged(auth, (user) => {
     if (user) {
         currentUser = user;
@@ -232,218 +639,49 @@ onAuthStateChanged(auth, (user) => {
         loginOverlay.style.display = 'none';
         appContent.style.display = 'block';
         
-        // --- ADMIN CHECK ---
-        if(user.email === ADMIN_EMAIL) {
-            document.getElementById('admin-panel').style.display = 'block';
-            document.getElementById('local-lock-section').style.display = 'none'; // Hide local lock for admin for cleaner UI
-            setupAdminDashboard();
-        } else {
-            document.getElementById('admin-panel').style.display = 'none';
-            document.getElementById('local-lock-section').style.display = 'block';
-            startHeartbeat(user); // Start presence tracking for non-admins
-        }
-
+        // Initialize session tracking
+        initSessionTracking(user.uid);
+        
+        // Setup listeners
         setupRealtimeListeners(user.uid);
+        setupRemoteLockListener(user.uid);
         
         // Initialize Local Security State
         loadLocalSecurityState(user.uid);
         applySecurityLocks();
-
-        if(autoCheckInterval) clearInterval(autoCheckInterval);
+        
+        // Show/Hide admin panel
+        if (isAdmin() && adminPanel) {
+            adminPanel.style.display = 'block';
+            loadAllUserSessions();
+            // Refresh device list every 30 seconds
+            setInterval(loadAllUserSessions, 30000);
+        } else if (adminPanel) {
+            adminPanel.style.display = 'none';
+        }
+        
+        if (autoCheckInterval) clearInterval(autoCheckInterval);
         autoCheckInterval = setInterval(performSync, 15000);
+        
+        updateOnlineStatus();
     } else {
+        // Cleanup session on logout
+        if (currentUser) {
+            cleanupSession(currentUser.uid);
+        }
+        
         currentUser = null;
         loadingScreen.style.display = 'none';
         loginOverlay.style.display = 'flex';
         appContent.style.display = 'none';
         
-        // Clean up listeners
         if (ticketsUnsubscribe) ticketsUnsubscribe();
         if (settingsUnsubscribe) settingsUnsubscribe();
         if (securityUnsubscribe) securityUnsubscribe();
-        if (adminDirectoryUnsubscribe) adminDirectoryUnsubscribe();
+        if (remoteLockUnsubscribe) remoteLockUnsubscribe();
         if (autoCheckInterval) clearInterval(autoCheckInterval);
-        if (heartbeatInterval) clearInterval(heartbeatInterval);
     }
 });
-
-// ==========================================
-// HEARTBEAT SYSTEM (USER PRESENCE)
-// ==========================================
-async function startHeartbeat(user) {
-    if(!user) return;
-    
-    // Generate or retrieve a persistent device ID for this browser
-    let deviceId = localStorage.getItem('device_session_id');
-    if (!deviceId) {
-        deviceId = 'dev_' + Math.random().toString(36).substr(2, 9);
-        localStorage.setItem('device_session_id', deviceId);
-    }
-
-    const registryRef = doc(db, APP_COLLECTION_ROOT, DIRECTORY_PATH, 'users', user.uid);
-
-    const beat = async () => {
-        if(!currentUser) return;
-        try {
-            // Read current registry data to update session map without overwriting others
-            // Note: In high concurrency, a transaction is better, but this is simple for valid use cases
-            const docSnap = await getDoc(registryRef);
-            let sessions = {};
-            if(docSnap.exists()) {
-                sessions = docSnap.data().sessions || {};
-            }
-
-            // Prune old sessions (> 60 seconds inactive)
-            const now = Date.now();
-            Object.keys(sessions).forEach(key => {
-                if(now - sessions[key] > 60000) {
-                    delete sessions[key];
-                }
-            });
-
-            // Update MY session
-            sessions[deviceId] = now;
-
-            // Write back
-            await setDoc(registryRef, {
-                email: user.email,
-                sessions: sessions,
-                lastSeen: now // Global last seen
-            }, { merge: true });
-
-        } catch (e) {
-            console.error("Heartbeat failed", e);
-        }
-    };
-
-    // Initial beat
-    beat();
-    // Loop
-    heartbeatInterval = setInterval(beat, 15000); // 15 seconds
-}
-
-// ==========================================
-// ADMIN DASHBOARD LOGIC
-// ==========================================
-function setupAdminDashboard() {
-    const usersRef = collection(db, APP_COLLECTION_ROOT, DIRECTORY_PATH, 'users');
-    
-    adminDirectoryUnsubscribe = onSnapshot(usersRef, (snapshot) => {
-        const container = document.getElementById('active-users-list');
-        container.innerHTML = '';
-        
-        if (snapshot.empty) {
-            container.innerHTML = '<div style="text-align: center; color: #666; padding: 20px;">No active users found.</div>';
-            return;
-        }
-
-        snapshot.forEach(docSnap => {
-            const userData = docSnap.data();
-            const uid = docSnap.id;
-            
-            // Skip admin himself if he ends up in registry
-            if(userData.email === ADMIN_EMAIL) return;
-
-            // Calculate Online Status & Device Count
-            const now = Date.now();
-            let deviceCount = 0;
-            let isOnline = false;
-
-            if(userData.sessions) {
-                // Count sessions active in last 40 seconds (allow some buffer)
-                const activeSessions = Object.values(userData.sessions).filter(ts => (now - ts) < 40000);
-                deviceCount = activeSessions.length;
-                if(deviceCount > 0) isOnline = true;
-            }
-
-            const statusClass = isOnline ? 'online' : '';
-            const statusText = isOnline ? 'Online' : 'Offline';
-            const deviceText = deviceCount === 1 ? '1 Device' : `${deviceCount} Devices`;
-
-            // Create Card
-            const card = document.createElement('div');
-            card.className = 'user-card';
-            card.innerHTML = `
-                <div class="user-card-header">
-                    <span class="user-email" title="${userData.email}">${userData.email}</span>
-                    <span class="user-status-dot ${statusClass}" title="${statusText}"></span>
-                </div>
-                <div class="user-meta">
-                    <span class="user-device-count"><i class="fa-solid fa-desktop"></i> ${deviceText}</span>
-                    <span style="font-size: 0.75rem;">${isOnline ? 'Active Now' : 'Last seen: ' + new Date(userData.lastSeen || 0).toLocaleTimeString()}</span>
-                </div>
-                <div class="user-card-actions">
-                    <button class="admin-action-btn lock-btn" data-uid="${uid}" data-email="${userData.email}">
-                        <i class="fa-solid fa-lock"></i> Configure Lock
-                    </button>
-                </div>
-            `;
-            container.appendChild(card);
-        });
-
-        // Add Listeners to Buttons
-        document.querySelectorAll('.lock-btn').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const uid = e.target.closest('button').dataset.uid;
-                const email = e.target.closest('button').dataset.email;
-                openAdminLockModal(uid, email);
-            });
-        });
-    });
-}
-
-// --- ADMIN LOCK MODAL LOGIC ---
-function openAdminLockModal(uid, email) {
-    currentAdminTargetUid = uid;
-    adminTargetUserSpan.textContent = email;
-    adminLockPassword.value = '';
-    
-    // Clear checkboxes
-    document.querySelectorAll('.admin-lock-check').forEach(cb => cb.checked = false);
-    
-    // Optional: Fetch current lock state to pre-fill? 
-    // For simplicity, we start fresh, or admin overwrites.
-    
-    adminLockModal.style.display = 'flex';
-}
-
-cancelAdminLockBtn.addEventListener('click', () => {
-    adminLockModal.style.display = 'none';
-    currentAdminTargetUid = null;
-});
-
-applyAdminLockBtn.addEventListener('click', async () => {
-    if(!currentAdminTargetUid) return;
-
-    const password = adminLockPassword.value;
-    if(!password) return alert("Please set a session password.");
-
-    const selectedTabs = [];
-    document.querySelectorAll('.admin-lock-check:checked').forEach(cb => {
-        selectedTabs.push(cb.value);
-    });
-
-    const lockData = {
-        password: password,
-        lockedTabs: selectedTabs,
-        remoteLock: true, // Marker for client to know it's forced
-        updatedAt: Date.now()
-    };
-
-    try {
-        await setDoc(doc(db, APP_COLLECTION_ROOT, currentAdminTargetUid, 'settings', 'security'), lockData, { merge: true });
-        showToast("Command Sent", "Lock configuration applied to target devices.");
-        adminLockModal.style.display = 'none';
-    } catch (err) {
-        console.error("Admin lock failed:", err);
-        alert("Failed to apply lock.");
-    }
-});
-
-
-// ==========================================
-// CORE APP LOGIC (LOGIN, TICKET, ETC)
-// ==========================================
 
 loginButton.addEventListener('click', async () => {
     const email = emailInput.value;
@@ -483,13 +721,16 @@ function showError(msg) {
     loginButton.disabled = false;
 }
 
-let bookedTickets = [];
-let eventSettings = { name: '', place: '', deadline: '' };
+// ==========================================
+// FIREBASE LISTENERS
+// ==========================================
 
 function setupRealtimeListeners(userId) {
+    // Tickets listener
     const ticketsRef = collection(db, APP_COLLECTION_ROOT, userId, 'tickets');
     const q = query(ticketsRef);
     
+    if (ticketsUnsubscribe) ticketsUnsubscribe();
     ticketsUnsubscribe = onSnapshot(q, (snapshot) => {
         bookedTickets = [];
         snapshot.forEach((doc) => {
@@ -499,7 +740,9 @@ function setupRealtimeListeners(userId) {
         checkAutoAbsent();
     });
 
+    // Settings listener
     const settingsRef = doc(db, APP_COLLECTION_ROOT, userId, 'settings', 'config');
+    if (settingsUnsubscribe) settingsUnsubscribe();
     settingsUnsubscribe = onSnapshot(settingsRef, (docSnap) => {
         if (docSnap.exists()) {
             eventSettings = docSnap.data();
@@ -511,163 +754,668 @@ function setupRealtimeListeners(userId) {
         }
     });
 
-    // --- SECURITY LISTENER (REMOTE LOCK SYNC) ---
+    // Security listener (Global Password)
     const securityRef = doc(db, APP_COLLECTION_ROOT, userId, 'settings', 'security');
+    if (securityUnsubscribe) securityUnsubscribe();
     securityUnsubscribe = onSnapshot(securityRef, (docSnap) => {
         if (docSnap.exists()) {
-            const data = docSnap.data();
-            
-            // 1. Sync Password
-            globalPassword = data.password || "";
-            
-            // 2. Check for Remote Lock (Forced by Admin)
-            if (data.remoteLock === true && currentUser.email !== ADMIN_EMAIL) {
-                // Enforce lock locally
-                localLockState.isLocked = true;
-                localLockState.lockedTabs = data.lockedTabs || [];
-                saveLocalSecurityState();
-                applySecurityLocks();
-                
-                // Show notification only if it wasn't already locked exactly this way
-                // (Simple check to avoid toast spam)
-                const currentHash = JSON.stringify(localLockState);
-                if(sessionStorage.getItem('lastLockHash') !== currentHash) {
-                    showToast("Security Update", "Administrator has locked your access.");
-                    sessionStorage.setItem('lastLockHash', currentHash);
-                }
-            }
+            globalPassword = docSnap.data().password || "";
         } else {
             globalPassword = "";
         }
     });
 }
 
-// --- LOCAL SECURITY STORAGE ---
-function loadLocalSecurityState(userId) {
-    const stored = localStorage.getItem(`ticketApp_lockState_${userId}`);
-    if (stored) {
-        localLockState = JSON.parse(stored);
-    } else {
-        localLockState = { isLocked: false, lockedTabs: [] };
-    }
+// ==========================================
+// TICKET MANAGEMENT
+// ==========================================
+
+const ticketForm = document.getElementById('ticketForm');
+if (ticketForm) {
+    ticketForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!currentUser) return;
+
+        const name = document.getElementById('name').value;
+        const gender = document.getElementById('gender').value;
+        const age = document.getElementById('age').value;
+        const phone = document.getElementById('phone').value;
+
+        // Security check for locked tab
+        if (localLockState.isLocked && localLockState.lockedTabs.includes('create')) {
+            showToast("Access Denied", "Issue Ticket tab is locked on this device.");
+            return;
+        }
+
+        const newTicket = {
+            name,
+            gender,
+            age,
+            phone: '+91' + phone,
+            status: 'coming-soon',
+            scanned: false,
+            createdAt: Date.now()
+        };
+
+        try {
+            const docRef = await addDoc(collection(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets'), newTicket);
+            updateTicketPreview({ ...newTicket, id: docRef.id });
+            ticketForm.reset();
+        } catch (err) {
+            console.error(err);
+            alert("Error creating ticket");
+        }
+    });
 }
 
-function saveLocalSecurityState() {
-    if(currentUser) {
-        localStorage.setItem(`ticketApp_lockState_${currentUser.uid}`, JSON.stringify(localLockState));
-    }
+function updateTicketPreview(ticket) {
+    document.getElementById('ticketName').textContent = ticket.name;
+    document.getElementById('ticketAgeGender').textContent = `${ticket.age} / ${ticket.gender}`;
+    document.getElementById('ticketPhone').textContent = ticket.phone;
+    document.getElementById('ticketSerial').textContent = `ID: ${ticket.id}`;
+    const qrcodeContainer = document.getElementById('qrcode');
+    qrcodeContainer.innerHTML = '';
+    new QRCode(qrcodeContainer, {
+        text: ticket.id,
+        width: 100,
+        height: 100,
+        colorDark: "#000000",
+        colorLight: "#ffffff",
+        correctLevel: QRCode.CorrectLevel.H
+    });
+    const whatsappBtn = document.getElementById('whatsappBtn');
+    if (whatsappBtn) whatsappBtn.disabled = false;
 }
 
-function applySecurityLocks() {
-    const { isLocked, lockedTabs } = localLockState;
-    const allNavs = document.querySelectorAll('.nav-btn');
+// ==========================================
+// BOOKED TICKETS TABLE
+// ==========================================
 
-    // Reset visual state
-    allNavs.forEach(btn => {
-        btn.classList.remove('locked');
+const bookedTicketsTable = document.getElementById('bookedTicketsTable');
+let isSelectionMode = false;
+
+function renderBookedTickets() {
+    if (!bookedTicketsTable) return;
+    
+    bookedTicketsTable.innerHTML = '';
+
+    // Handle header visibility for checkbox column
+    const checkHeader = document.querySelector('.tickets-table thead th:first-child');
+    if (checkHeader) {
+        checkHeader.style.display = isSelectionMode ? 'table-cell' : 'none';
+    }
+
+    // 1. FILTER
+    let displayTickets = bookedTickets.filter(ticket => {
+        const matchesSearch = ticket.name.toLowerCase().includes(searchTerm) || 
+                             ticket.phone.includes(searchTerm);
+        if (!matchesSearch) return false;
+
+        if (currentFilter !== 'all' && ticket.status !== currentFilter) return false;
+        if (currentGenderFilter !== 'all' && ticket.gender !== currentGenderFilter) return false;
+
+        return true;
     });
 
-    if (isLocked) {
-        // Mark Config as locked visually
-        document.querySelector('[data-tab="settings"]').classList.add('locked');
-        
-        // Mark selected tabs as locked visually
-        lockedTabs.forEach(tabName => {
-            const btn = document.querySelector(`[data-tab="${tabName}"]`);
-            if(btn) btn.classList.add('locked');
-        });
+    // 2. SORT
+    displayTickets.sort((a, b) => {
+        if (currentSort === 'newest') return b.createdAt - a.createdAt;
+        if (currentSort === 'oldest') return a.createdAt - b.createdAt;
+        if (currentSort === 'name-asc') return a.name.localeCompare(b.name);
+        if (currentSort === 'name-desc') return b.name.localeCompare(a.name);
+        if (currentSort === 'age-asc') return Number(a.age) - Number(b.age);
+        if (currentSort === 'age-desc') return Number(b.age) - Number(a.age);
+        if (currentSort === 'gender') return a.gender.localeCompare(b.gender);
+        return 0;
+    });
 
-        // Update Lock Controls UI (If visible)
-        if(lockSystemBtn) {
-            lockSystemBtn.innerHTML = '<i class="fa-solid fa-lock"></i> Locked';
-            lockSystemBtn.classList.add('active'); 
-            lockSystemBtn.disabled = true;
+    currentFilteredTickets = displayTickets;
+
+    if (displayTickets.length === 0) {
+        bookedTicketsTable.innerHTML = '<tr><td colspan="8" style="text-align:center; padding: 30px; color: #666;">No matching guests found.</td></tr>';
+        return;
+    }
+
+    // Display logic for the checkbox column in rows
+    const checkboxDisplayStyle = isSelectionMode ? 'table-cell' : 'none';
+
+    displayTickets.forEach((ticket, index) => {
+        const tr = document.createElement('tr');
+        tr.dataset.id = ticket.id;
+        
+        let statusHtml = `<span class="status-badge status-${ticket.status}">${ticket.status.replace('-', ' ')}</span>`;
+        if (ticket.status === 'arrived' && ticket.scannedAt) {
+            const dateObj = new Date(ticket.scannedAt);
+            
+            // Format Date: DD/MMM/YYYY
+            const day = String(dateObj.getDate()).padStart(2, '0');
+            const month = dateObj.toLocaleString('en-US', { month: 'short' }).toUpperCase();
+            const year = dateObj.getFullYear();
+            const dateStr = `${day}/${month}/${year}`;
+
+            // Format Time: HH:MM:SS AM/PM
+            const timeStr = dateObj.toLocaleTimeString('en-US', { 
+                hour: '2-digit', 
+                minute: '2-digit', 
+                second: '2-digit', 
+                hour12: true 
+            });
+
+            statusHtml += `<div style="font-size: 0.6rem; color: #888; margin-top: 3px; white-space: nowrap;">On - ${dateStr}</div>`;
+            statusHtml += `<div style="font-size: 0.6rem; color: #888; white-space: nowrap;">At - ${timeStr}</div>`;
+        }
+
+        const isChecked = selectedTicketIds.has(ticket.id) ? 'checked' : '';
+
+        tr.innerHTML = `
+            <td style="display: ${checkboxDisplayStyle};"><input type="checkbox" class="ticket-checkbox" style="transform: scale(1.2);" ${isChecked}></td>
+            <td style="text-align: center; color: var(--accent-secondary); font-weight: bold;">${index + 1}</td>
+            <td style="font-weight: 500; color: white;">${ticket.name}</td>
+            <td>
+                <div style="display: flex; align-items: center; gap: 8px; white-space: nowrap;">
+                    <span>${ticket.age}</span>
+                    <span style="color: #444;">|</span>
+                    <span>${ticket.gender}</span>
+                </div>
+            </td>
+            <td>${ticket.phone}</td>
+            <td style="font-family: monospace; font-size: 0.8rem; color: #888;">${ticket.id.substring(0, 8)}...</td>
+            <td>${statusHtml}</td>
+            <td><button class="action-btn-small view-ticket-btn" data-id="${ticket.id}">View</button></td>
+        `;
+        bookedTicketsTable.appendChild(tr);
+    });
+
+    // Add event listeners
+    document.querySelectorAll('.view-ticket-btn').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+            const ticket = bookedTickets.find(t => t.id === e.target.dataset.id);
+            if (ticket) {
+                document.getElementById('modalTicketName').textContent = ticket.name;
+                document.getElementById('modalTicketAgeGender').textContent = `${ticket.age} / ${ticket.gender}`;
+                document.getElementById('modalTicketPhone').textContent = ticket.phone;
+                document.getElementById('modalTicketSerial').textContent = `ID: ${ticket.id}`;
+                
+                const modalQrcodeContainer = document.getElementById('modalQrcode');
+                modalQrcodeContainer.innerHTML = '';
+                new QRCode(modalQrcodeContainer, {
+                    text: ticket.id,
+                    width: 100,
+                    height: 100,
+                    colorDark: "#000000",
+                    colorLight: "#ffffff",
+                    correctLevel: QRCode.CorrectLevel.H
+                });
+
+                ticketViewModal.style.display = 'flex';
+            }
+        });
+    });
+
+    document.querySelectorAll('.ticket-checkbox').forEach(box => {
+        box.addEventListener('change', (e) => {
+            const rowId = e.target.closest('tr').dataset.id;
+            if (e.target.checked) {
+                selectedTicketIds.add(rowId);
+            } else {
+                selectedTicketIds.delete(rowId);
+            }
+            updateSelectionCount();
+        });
+    });
+}
+
+// ==========================================
+// SELECTION MODE FUNCTIONS
+// ==========================================
+
+const selectBtn = document.getElementById('selectBtn');
+const deleteBtn = document.getElementById('deleteBtn');
+const selectAllCheckbox = document.getElementById('selectAllCheckbox');
+const selectAllContainer = document.querySelector('.select-all-container');
+const selectionCountSpan = document.getElementById('selectionCount');
+
+if (selectBtn) {
+    selectBtn.addEventListener('click', () => {
+        // Security check for locked tab
+        if (localLockState.isLocked && localLockState.lockedTabs.includes('booked')) {
+            showToast("Access Denied", "Guest List tab is locked on this device.");
+            return;
         }
         
-        // Fill checkboxes based on state & disable them
-        lockCheckboxes.forEach(cb => {
-            cb.checked = lockedTabs.includes(cb.value);
-            cb.disabled = true;
-        });
-        lockPasswordInput.disabled = true;
-        lockPasswordInput.value = ''; // Hide password
+        isSelectionMode = !isSelectionMode;
+        if (deleteBtn) deleteBtn.style.display = isSelectionMode ? 'inline-block' : 'none';
+        if (selectAllContainer) selectAllContainer.style.display = isSelectionMode ? 'flex' : 'none';
+        selectBtn.textContent = isSelectionMode ? 'Cancel' : 'Select';
+        if (!isSelectionMode) {
+            selectedTicketIds.clear();
+            if (selectAllCheckbox) selectAllCheckbox.checked = false;
+            updateSelectionCount();
+        } else {
+            if (exportTriggerBtn) exportTriggerBtn.disabled = true;
+        }
+        renderBookedTickets();
+    });
+}
 
-        // If current tab is locked, move away
-        const activeBtn = document.querySelector('.nav-btn.active');
-        if(activeBtn) {
-            const currentTab = activeBtn.dataset.tab;
-            if(lockedTabs.includes(currentTab) || currentTab === 'settings') {
-                 // Try to find an unlocked tab
-                 const unlocked = ['create', 'booked', 'scanner'].find(t => !lockedTabs.includes(t));
-                 if(unlocked) {
-                     document.querySelector(`[data-tab="${unlocked}"]`).click();
-                 } else {
-                     // If all locked, stay on create but it's visually locked (edge case)
-                     document.querySelector(`[data-tab="create"]`).click();
-                 }
+if (selectAllCheckbox) {
+    selectAllCheckbox.addEventListener('change', (e) => {
+        const isChecked = e.target.checked;
+        currentFilteredTickets.forEach(t => {
+            if (isChecked) selectedTicketIds.add(t.id);
+            else selectedTicketIds.delete(t.id);
+        });
+        renderBookedTickets();
+        updateSelectionCount();
+    });
+}
+
+function updateSelectionCount() {
+    const count = selectedTicketIds.size;
+    if (selectionCountSpan) selectionCountSpan.textContent = `(${count} selected)`;
+    if (exportTriggerBtn) exportTriggerBtn.disabled = count === 0;
+    const allVisibleSelected = currentFilteredTickets.length > 0 && 
+                               currentFilteredTickets.every(t => selectedTicketIds.has(t.id));
+    if (currentFilteredTickets.length === 0 && selectAllCheckbox) selectAllCheckbox.checked = false;
+    else if (selectAllCheckbox) selectAllCheckbox.checked = allVisibleSelected;
+}
+
+// ==========================================
+// DELETE FUNCTIONALITY
+// ==========================================
+
+if (deleteBtn) {
+    deleteBtn.addEventListener('click', () => {
+        const selectedIds = Array.from(selectedTicketIds);
+        if (selectedIds.length === 0) return alert('Select tickets to delete');
+        pendingDeleteIds = selectedIds;
+        if (deleteCountSpan) deleteCountSpan.textContent = selectedIds.length;
+        if (confirmModal) confirmModal.style.display = 'flex';
+    });
+}
+
+if (cancelDeleteBtn) {
+    cancelDeleteBtn.addEventListener('click', () => {
+        if (confirmModal) confirmModal.style.display = 'none';
+        pendingDeleteIds = [];
+    });
+}
+
+if (confirmDeleteBtn) {
+    confirmDeleteBtn.addEventListener('click', async () => {
+        if (pendingDeleteIds.length > 0) {
+            confirmDeleteBtn.textContent = "Deleting...";
+            for (const id of pendingDeleteIds) {
+                await deleteDoc(doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets', id));
+            }
+            if (confirmModal) confirmModal.style.display = 'none';
+            confirmDeleteBtn.textContent = "Delete";
+            pendingDeleteIds = [];
+            selectedTicketIds.clear();
+            if (selectBtn) selectBtn.click();
+        }
+    });
+}
+
+// ==========================================
+// EXPORT FUNCTIONALITY
+// ==========================================
+
+if (exportTriggerBtn) {
+    exportTriggerBtn.addEventListener('click', () => {
+        const count = selectedTicketIds.size;
+        if (count === 0) return;
+        if (exportCountMsg) exportCountMsg.textContent = `Ready to export ${count} item${count !== 1 ? 's' : ''}.`;
+        const today = new Date().toISOString().slice(0, 10).replace(/-/g, '_');
+        if (exportFileName) exportFileName.value = `guest_list_${today}`;
+        if (exportModal) exportModal.style.display = 'flex';
+    });
+}
+
+if (cancelExportBtn) {
+    cancelExportBtn.addEventListener('click', () => {
+        if (exportModal) exportModal.style.display = 'none';
+    });
+}
+
+if (confirmExportBtn) {
+    confirmExportBtn.addEventListener('click', () => {
+        const filename = exportFileName ? exportFileName.value : 'guest_list';
+        const format = exportFormat ? exportFormat.value : 'csv';
+        
+        let listToExport = [];
+        
+        if (selectedTicketIds.size > 0) {
+            listToExport = currentFilteredTickets.filter(t => selectedTicketIds.has(t.id));
+        } else {
+            if (exportModal) exportModal.style.display = 'none';
+            return alert("No data selected to export.");
+        }
+        
+        switch (format) {
+            case 'csv': exportCSV(listToExport, filename); break;
+            case 'xlsx': exportXLSX(listToExport, filename); break;
+            case 'pdf': exportPDF(listToExport, filename); break;
+            case 'txt': exportTXT(listToExport, filename); break;
+            case 'json': exportJSON(listToExport, filename); break;
+            case 'doc': exportDOC(listToExport, filename); break;
+        }
+        if (exportModal) exportModal.style.display = 'none';
+        showToast("Export Complete", `${listToExport.length} records saved as .${format}`);
+    });
+}
+
+// Export functions (same as before, but with safety checks)
+function exportCSV(data, filename) {
+    let csvContent = "data:text/csv;charset=utf-8,";
+    csvContent += "S.No.,Guest Name,Age,Gender,Phone,Status,Ticket ID,Entry Time\n";
+    data.forEach((row, index) => {
+        const scannedTime = row.scannedAt ? new Date(row.scannedAt).toLocaleTimeString() : "";
+        const cleanName = row.name.replace(/,/g, "");
+        const rowStr = `${index + 1},${cleanName},${row.age},${row.gender},${row.phone},${row.status},${row.id},${scannedTime}`;
+        csvContent += rowStr + "\n";
+    });
+    downloadFile(encodeURI(csvContent), `${filename}.csv`);
+}
+
+function exportXLSX(data, filename) {
+    const worksheetData = data.map((row, index) => ({
+        "S.No.": index + 1,
+        "Guest Name": row.name,
+        "Age": row.age,
+        "Gender": row.gender,
+        "Phone": row.phone,
+        "Status": row.status,
+        "Ticket ID": row.id,
+        "Entry Time": row.scannedAt ? new Date(row.scannedAt).toLocaleTimeString() : ""
+    }));
+    const ws = XLSX.utils.json_to_sheet(worksheetData);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, ws, "Guests");
+    XLSX.writeFile(wb, `${filename}.xlsx`);
+}
+
+function exportPDF(data, filename) {
+    const { jsPDF } = window.jspdf;
+    const doc = new jsPDF();
+    doc.text("Event Guest List", 14, 20);
+    doc.setFontSize(10);
+    doc.text(`Generated: ${new Date().toLocaleString()}`, 14, 26);
+    const tableColumn = ["#", "Name", "Age", "Gender", "Phone", "Status", "Entry Time"];
+    const tableRows = [];
+    data.forEach((row, index) => {
+        tableRows.push([
+            index + 1,
+            row.name,
+            row.age,
+            row.gender,
+            row.phone,
+            row.status.toUpperCase(),
+            row.scannedAt ? new Date(row.scannedAt).toLocaleTimeString() : "--"
+        ]);
+    });
+    doc.autoTable({ head: [tableColumn], body: tableRows, startY: 32 });
+    doc.save(`${filename}.pdf`);
+}
+
+function exportTXT(data, filename) {
+    let content = `GUEST LIST EXPORT - ${new Date().toLocaleString()}\n\n`;
+    data.forEach((row, i) => {
+        content += `${i + 1}. ${row.name.toUpperCase()} \n`;
+        content += `   Details: ${row.age} / ${row.gender}\n`;
+        content += `   Phone: ${row.phone}\n`;
+        content += `   Status: ${row.status.toUpperCase()}\n`;
+        if (row.scannedAt) content += `   Entry: ${new Date(row.scannedAt).toLocaleTimeString()}\n`;
+        content += `   ID: ${row.id}\n`;
+        content += "----------------------------------------\n";
+    });
+    const blob = new Blob([content], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    downloadFile(url, `${filename}.txt`);
+}
+
+function exportJSON(data, filename) {
+    const jsonWithSerial = data.map((item, index) => ({
+        s_no: index + 1,
+        ...item
+    }));
+    const jsonStr = JSON.stringify(jsonWithSerial, null, 2);
+    const blob = new Blob([jsonStr], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    downloadFile(url, `${filename}.json`);
+}
+
+function exportDOC(data, filename) {
+    let htmlBody = `
+        <html xmlns:o='urn:schemas-microsoft-com:office:office' xmlns:w='urn:schemas-microsoft-com:office:word' xmlns='http://www.w3.org/TR/REC-html40'>
+        <head><meta charset='utf-8'><title>Guest List</title></head><body>
+        <h2>Guest List Export</h2>
+        <table border="1" style="border-collapse: collapse; width: 100%;">
+            <tr style="background: #eee;">
+                <th>S.No.</th><th>Name</th><th>Age/Gender</th><th>Phone</th><th>Status</th>
+            </tr>
+    `;
+    data.forEach((row, index) => {
+        htmlBody += `<tr><td>${index + 1}</td><td>${row.name}</td><td>${row.age} / ${row.gender}</td><td>${row.phone}</td><td>${row.status}</td></tr>`;
+    });
+    htmlBody += "</table></body></html>";
+    const blob = new Blob(['\ufeff', htmlBody], { type: 'application/msword' });
+    const url = URL.createObjectURL(blob);
+    downloadFile(url, `${filename}.doc`);
+}
+
+function downloadFile(uri, filename) {
+    const link = document.createElement("a");
+    link.href = uri;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+// ==========================================
+// SEARCH & FILTER
+// ==========================================
+
+if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+        searchTerm = e.target.value.toLowerCase().trim();
+        renderBookedTickets();
+    });
+}
+
+if (filterSortBtn) {
+    filterSortBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (filterDropdown) filterDropdown.classList.toggle('show');
+    });
+}
+
+window.addEventListener('click', () => {
+    if (filterDropdown) filterDropdown.classList.remove('show');
+});
+
+document.querySelectorAll('.dropdown-item').forEach(item => {
+    item.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const type = item.dataset.type;
+        const val = item.dataset.val;
+        document.querySelectorAll(`.dropdown-item[data-type="${type}"]`).forEach(el => el.classList.remove('selected'));
+        item.classList.add('selected');
+
+        if (type === 'filter') currentFilter = val;
+        if (type === 'filter-gender') currentGenderFilter = val;
+        if (type === 'sort') currentSort = val;
+
+        renderBookedTickets();
+        if (filterDropdown) filterDropdown.classList.remove('show');
+    });
+});
+
+// ==========================================
+// NAVIGATION
+// ==========================================
+
+const navButtons = document.querySelectorAll('.nav-btn');
+const tabs = document.querySelectorAll('.tab-content');
+
+navButtons.forEach(button => {
+    button.addEventListener('click', (e) => {
+        const targetTab = button.dataset.tab;
+
+        // Security Check (Local State)
+        if (localLockState.isLocked) {
+            // Case 1: Clicking Configuration (Always locked if system is locked)
+            if (targetTab === 'settings') {
+                e.preventDefault();
+                if (unlockModal) {
+                    unlockModal.style.display = 'flex';
+                    if (unlockPasswordInput) unlockPasswordInput.focus();
+                }
+                return; // Stop navigation
+            }
+            
+            // Case 2: Clicking a specifically locked tab
+            if (localLockState.lockedTabs.includes(targetTab)) {
+                e.preventDefault();
+                showToast("Access Denied", "This tab is locked on this device.");
+                return; // Stop navigation
             }
         }
 
-    } else {
-        // Unlocked State
-        lockCheckboxes.forEach(cb => {
-            cb.disabled = false;
-        });
-        lockPasswordInput.disabled = false;
-        if(lockSystemBtn) {
-            lockSystemBtn.disabled = false;
-            lockSystemBtn.innerHTML = '<i class="fa-solid fa-lock"></i> Lock Tabs';
+        // Standard Navigation Logic
+        const scannerVideo = document.getElementById('scanner-video');
+        if (scannerVideo && scannerVideo.srcObject && button.dataset.tab !== 'scanner') {
+            stopScan();
         }
-    }
+
+        navButtons.forEach(btn => btn.classList.remove('active'));
+        button.classList.add('active');
+
+        tabs.forEach(tab => {
+            tab.classList.remove('active');
+            if (tab.id === button.dataset.tab) {
+                tab.classList.add('active');
+            }
+        });
+    });
+});
+
+// ==========================================
+// SETTINGS
+// ==========================================
+
+const eventSettingsForm = document.getElementById('eventSettingsForm');
+if (eventSettingsForm) {
+    eventSettingsForm.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        if (!currentUser) return;
+
+        const newSettings = {
+            name: document.getElementById('eventName').value,
+            place: document.getElementById('eventPlace').value,
+            deadline: document.getElementById('arrivalDeadline').value
+        };
+
+        const settingsRef = doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'settings', 'config');
+        await setDoc(settingsRef, newSettings, { merge: true });
+        alert('Settings Saved!');
+    });
 }
 
-// --- LOCK ACTION (LOCAL) ---
-if(lockSystemBtn) {
+function updateSettingsDisplay() {
+    const currentEventName = document.getElementById('currentEventName');
+    const currentEventPlace = document.getElementById('currentEventPlace');
+    const currentDeadline = document.getElementById('currentDeadline');
+    const eventNamePlace = document.getElementById('eventNamePlace');
+    const eventNameInput = document.getElementById('eventName');
+    const eventPlaceInput = document.getElementById('eventPlace');
+    const arrivalDeadlineInput = document.getElementById('arrivalDeadline');
+    const modalEventNamePlace = document.getElementById('modalEventNamePlace');
+
+    if (currentEventName) currentEventName.textContent = eventSettings.name || 'Not set';
+    if (currentEventPlace) currentEventPlace.textContent = eventSettings.place || 'Not set';
+    if (currentDeadline) currentDeadline.textContent = eventSettings.deadline ? new Date(eventSettings.deadline).toLocaleString() : 'Not set';
+    if (eventNamePlace) eventNamePlace.textContent = eventSettings.name && eventSettings.place ? `${eventSettings.name} | ${eventSettings.place}` : 'EVENT DETAILS';
+    if (eventNameInput) eventNameInput.value = eventSettings.name || '';
+    if (eventPlaceInput) eventPlaceInput.value = eventSettings.place || '';
+    if (arrivalDeadlineInput) arrivalDeadlineInput.value = eventSettings.deadline || '';
+    if (modalEventNamePlace) modalEventNamePlace.textContent = eventSettings.name && eventSettings.place ? `${eventSettings.name} | ${eventSettings.place}` : 'EVENT DETAILS';
+}
+
+// ==========================================
+// LOCK SYSTEM FUNCTIONALITY
+// ==========================================
+
+if (lockSystemBtn) {
     lockSystemBtn.addEventListener('click', async () => {
-        if(!currentUser) return;
+        if (!currentUser) return;
         
-        const inputPassword = lockPasswordInput.value;
-        if(!inputPassword) {
+        // If user is admin, show unlock modal
+        if (isAdmin()) {
+            if (unlockModal) {
+                unlockModal.style.display = 'flex';
+                if (unlockPasswordInput) unlockPasswordInput.focus();
+            }
+            return;
+        }
+        
+        // Regular user lock logic
+        const inputPassword = lockPasswordInput ? lockPasswordInput.value : '';
+        if (!inputPassword) {
             alert("Please set a password to lock the system.");
             return;
         }
 
         const selectedTabs = [];
         lockCheckboxes.forEach(cb => {
-            if(cb.checked) selectedTabs.push(cb.value);
+            if (cb.checked) selectedTabs.push(cb.value);
         });
 
-        // 1. Check against Global Password (Prevent Overwrite)
+        // Check against Global Password (Prevent Overwrite)
         if (globalPassword && globalPassword !== inputPassword) {
             showToast("Access Denied", "Incorrect Master Password. You cannot overwrite the existing global password.");
-            playError();
-            lockPasswordInput.classList.add('shake');
-            setTimeout(() => lockPasswordInput.classList.remove('shake'), 500);
+            if (lockPasswordInput) {
+                lockPasswordInput.classList.add('shake');
+                setTimeout(() => lockPasswordInput.classList.remove('shake'), 500);
+            }
             return;
         }
 
         try {
-            // 2. Only Save to DB if NO global password exists (First time setup)
+            // Only Save to DB if NO global password exists (First time setup)
             if (!globalPassword) {
                 await setDoc(doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'settings', 'security'), {
-                    password: inputPassword,
-                    remoteLock: false // Local lock is not remote
+                    password: inputPassword
                 }, { merge: true });
                 
                 globalPassword = inputPassword;
                 showToast("Setup Complete", "Global Master Password set.");
             }
             
-            // 3. Save Lock State Locally
+            // Save Lock State Locally
             localLockState = {
                 isLocked: true,
                 lockedTabs: selectedTabs
             };
             saveLocalSecurityState();
 
-            // 4. Apply UI changes
+            // Apply UI changes immediately
             applySecurityLocks();
-            showToast("Device Locked", "Configuration and selected tabs are now secured.");
+            
+            // Force navigate away from settings to a safe tab
+            const tabs = ['create', 'booked', 'scanner'];
+            for (const tab of tabs) {
+                if (!selectedTabs.includes(tab)) {
+                    const tabBtn = document.querySelector(`[data-tab="${tab}"]`);
+                    if (tabBtn) {
+                        tabBtn.click();
+                        break;
+                    }
+                }
+            }
+
+            showToast("Device Locked", "Configuration and selected tabs are now secured on this device.");
 
         } catch (err) {
             console.error("Lock error:", err);
@@ -676,38 +1424,58 @@ if(lockSystemBtn) {
     });
 }
 
-// --- UNLOCK ACTION (GLOBAL FOR BOTH LOCAL AND REMOTE LOCKS) ---
-cancelUnlockBtn.addEventListener('click', () => {
-    unlockModal.style.display = 'none';
-    unlockPasswordInput.value = '';
-    unlockError.style.display = 'none';
-});
+// ==========================================
+// UNLOCK FUNCTIONALITY
+// ==========================================
 
-confirmUnlockBtn.addEventListener('click', () => {
-    const enteredPass = unlockPasswordInput.value;
-    
-    // Compare against GLOBAL password synced from DB (which Admin sets if remote locked)
-    if(enteredPass === globalPassword) {
-        // Unlock this device locally
-        localLockState.isLocked = false;
-        localLockState.lockedTabs = [];
-        saveLocalSecurityState();
+if (cancelUnlockBtn) {
+    cancelUnlockBtn.addEventListener('click', () => {
+        if (unlockModal) unlockModal.style.display = 'none';
+        if (unlockPasswordInput) {
+            unlockPasswordInput.value = '';
+            unlockPasswordInput.classList.remove('shake');
+        }
+        if (unlockError) unlockError.style.display = 'none';
+    });
+}
+
+if (confirmUnlockBtn) {
+    confirmUnlockBtn.addEventListener('click', () => {
+        const enteredPass = unlockPasswordInput ? unlockPasswordInput.value : '';
         
-        applySecurityLocks();
-        
-        unlockModal.style.display = 'none';
-        unlockPasswordInput.value = '';
-        unlockError.style.display = 'none';
-        
-        // Navigate to settings
-        document.querySelector('[data-tab="settings"]').click();
-        showToast("Device Unlocked", "Access granted.");
-    } else {
-        unlockError.style.display = 'block';
-        unlockPasswordInput.classList.add('shake');
-        setTimeout(() => unlockPasswordInput.classList.remove('shake'), 500);
-    }
-});
+        // Compare against GLOBAL password synced from DB
+        if (enteredPass === globalPassword) {
+            // Unlock this device locally
+            localLockState.isLocked = false;
+            localLockState.lockedTabs = [];
+            saveLocalSecurityState();
+            
+            applySecurityLocks();
+            
+            if (unlockModal) unlockModal.style.display = 'none';
+            if (unlockPasswordInput) {
+                unlockPasswordInput.value = '';
+                unlockPasswordInput.classList.remove('shake');
+            }
+            if (unlockError) unlockError.style.display = 'none';
+            
+            // Navigate to settings
+            const settingsBtn = document.querySelector('[data-tab="settings"]');
+            if (settingsBtn) settingsBtn.click();
+            showToast("Device Unlocked", "Access granted.");
+        } else {
+            if (unlockError) unlockError.style.display = 'block';
+            if (unlockPasswordInput) {
+                unlockPasswordInput.classList.add('shake');
+                setTimeout(() => unlockPasswordInput.classList.remove('shake'), 500);
+            }
+        }
+    });
+}
+
+// ==========================================
+// AUTO ABSENT CHECK
+// ==========================================
 
 async function checkAutoAbsent() {
     if (!eventSettings.deadline || !bookedTickets.length || !currentUser) return;
@@ -741,437 +1509,153 @@ async function checkAutoAbsent() {
     }
 }
 
-const navButtons = document.querySelectorAll('.nav-btn');
-const tabs = document.querySelectorAll('.tab-content');
+// ==========================================
+// WHATSAPP SHARING
+// ==========================================
 
-// NAV LOGIC
-navButtons.forEach(button => {
-    button.addEventListener('click', (e) => {
-        const targetTab = button.dataset.tab;
+if (document.getElementById('whatsappBtn')) {
+    document.getElementById('whatsappBtn').addEventListener('click', () => {
+        const btn = document.getElementById('whatsappBtn');
+        const originalText = btn.textContent;
+        btn.textContent = "Processing...";
+        btn.disabled = true;
 
-        // Security Check
-        if (localLockState.isLocked) {
-            // Case 1: Clicking Configuration (Always locked if system is locked)
-            if (targetTab === 'settings') {
-                e.preventDefault();
-                unlockModal.style.display = 'flex';
-                unlockPasswordInput.focus();
-                return; // Stop navigation
-            }
+        const ticketTemplate = document.getElementById('ticketTemplate');
+        const originalBorder = ticketTemplate.style.border;
+        ticketTemplate.style.border = 'none';
+
+        html2canvas(ticketTemplate, {
+            scale: 3,
+            backgroundColor: null,
+            useCORS: true
+        }).then(canvas => {
+            ticketTemplate.style.border = originalBorder;
+
+            const now = new Date();
+            const pad = (num) => String(num).padStart(2, '0');
+            const timestamp = `${pad(now.getDate())}${pad(now.getMonth() + 1)}${now.getFullYear()}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
             
-            // Case 2: Clicking a specifically locked tab
-            if (localLockState.lockedTabs.includes(targetTab)) {
-                e.preventDefault();
-                showToast("Access Denied", "This tab is locked.");
-                return; // Stop navigation
-            }
-        }
+            const link = document.createElement('a');
+            link.download = `ticket-${timestamp}.png`;
+            link.href = canvas.toDataURL('image/png');
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
 
-        // Standard Navigation Logic
-        const scannerVideo = document.getElementById('scanner-video');
-        if (scannerVideo.srcObject && button.dataset.tab !== 'scanner') {
-            stopScan();
-        }
+            setTimeout(() => {
+                const phone = document.getElementById('ticketPhone').textContent.replace(/\D/g, '');
+                const name = document.getElementById('ticketName').textContent;
+                const message = encodeURIComponent(`Hello ${name}, here is your Entry Pass 🎫.\n*Keep this QR code ready at the entrance.*`);
+                window.location.href = `https://wa.me/${phone}?text=${message}`;
+                btn.textContent = originalText;
+                btn.disabled = true;
+                document.getElementById('ticketName').textContent = '--';
+                document.getElementById('ticketAgeGender').textContent = '-- / --';
+                document.getElementById('ticketPhone').textContent = '--';
+                document.getElementById('ticketSerial').textContent = 'ID: --';
+                document.getElementById('qrcode').innerHTML = '';
+                document.getElementById('ticketForm').reset();
+            }, 1500);
 
-        navButtons.forEach(btn => btn.classList.remove('active'));
-        button.classList.add('active');
-
-        tabs.forEach(tab => {
-            tab.classList.remove('active');
-            if (tab.id === button.dataset.tab) {
-                tab.classList.add('active');
-            }
+        }).catch(err => {
+            console.error(err);
+            alert("Error generating ticket image");
+            btn.textContent = originalText;
+            btn.disabled = false;
         });
     });
-});
-
-const eventSettingsForm = document.getElementById('eventSettingsForm');
-eventSettingsForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (!currentUser) return;
-
-    const newSettings = {
-        name: document.getElementById('eventName').value,
-        place: document.getElementById('eventPlace').value,
-        deadline: document.getElementById('arrivalDeadline').value
-    };
-
-    const settingsRef = doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'settings', 'config');
-    await setDoc(settingsRef, newSettings, { merge: true });
-    alert('Settings Saved!');
-});
-
-function updateSettingsDisplay() {
-    document.getElementById('currentEventName').textContent = eventSettings.name || 'Not set';
-    document.getElementById('currentEventPlace').textContent = eventSettings.place || 'Not set';
-    document.getElementById('currentDeadline').textContent = eventSettings.deadline ? new Date(eventSettings.deadline).toLocaleString() : 'Not set';
-    document.getElementById('eventNamePlace').textContent = eventSettings.name && eventSettings.place ? `${eventSettings.name} | ${eventSettings.place}` : 'EVENT DETAILS';
-    document.getElementById('eventName').value = eventSettings.name || '';
-    document.getElementById('eventPlace').value = eventSettings.place || '';
-    document.getElementById('arrivalDeadline').value = eventSettings.deadline || '';
-    document.getElementById('modalEventNamePlace').textContent = eventSettings.name && eventSettings.place ? `${eventSettings.name} | ${eventSettings.place}` : 'EVENT DETAILS';
 }
 
-const ticketForm = document.getElementById('ticketForm');
-ticketForm.addEventListener('submit', async (e) => {
-    e.preventDefault();
-    if (!currentUser) return;
+if (modalWhatsAppBtn) {
+    modalWhatsAppBtn.addEventListener('click', () => {
+        const btn = modalWhatsAppBtn;
+        const originalContent = btn.innerHTML;
+        btn.textContent = "Processing...";
+        btn.disabled = true;
 
-    const name = document.getElementById('name').value;
-    const gender = document.getElementById('gender').value;
-    const age = document.getElementById('age').value;
-    const phone = document.getElementById('phone').value;
+        const ticketTemplate = document.getElementById('modalTicketTemplate');
+        const originalBorder = ticketTemplate.style.border;
+        ticketTemplate.style.border = 'none';
 
-    const newTicket = {
-        name,
-        gender,
-        age,
-        phone: '+91' + phone,
-        status: 'coming-soon',
-        scanned: false,
-        createdAt: Date.now()
-    };
+        html2canvas(ticketTemplate, {
+            scale: 3,
+            backgroundColor: null,
+            useCORS: true
+        }).then(canvas => {
+            ticketTemplate.style.border = originalBorder;
+            
+            const now = new Date();
+            const pad = (num) => String(num).padStart(2, '0');
+            const timestamp = `${pad(now.getDate())}${pad(now.getMonth() + 1)}${now.getFullYear()}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
+            
+            const link = document.createElement('a');
+            link.download = `ticket-${timestamp}.png`;
+            link.href = canvas.toDataURL('image/png');
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
 
-    try {
-        const docRef = await addDoc(collection(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets'), newTicket);
-        updateTicketPreview({ ...newTicket, id: docRef.id });
-        ticketForm.reset();
-    } catch (err) {
-        console.error(err);
-        alert("Error creating ticket");
-    }
-});
-
-const bookedTicketsTable = document.getElementById('bookedTicketsTable');
-
-function renderBookedTickets() {
-    bookedTicketsTable.innerHTML = '';
-
-    // HANDLE HEADER VISIBILITY
-    const checkHeader = document.querySelector('.tickets-table thead th:first-child');
-    if(checkHeader) {
-        checkHeader.style.display = isSelectionMode ? 'table-cell' : 'none';
-    }
-
-    // 1. FILTER
-    let displayTickets = bookedTickets.filter(ticket => {
-        const matchesSearch = ticket.name.toLowerCase().includes(searchTerm) || ticket.phone.includes(searchTerm);
-        if (!matchesSearch) return false;
-
-        if (currentFilter !== 'all' && ticket.status !== currentFilter) return false;
-        if (currentGenderFilter !== 'all' && ticket.gender !== currentGenderFilter) return false;
-
-        return true;
-    });
-
-    // 2. SORT
-    displayTickets.sort((a, b) => {
-        if (currentSort === 'newest' || currentSort === 'serial-desc') return b.createdAt - a.createdAt;
-        if (currentSort === 'oldest' || currentSort === 'serial-asc') return a.createdAt - b.createdAt;
-        if (currentSort === 'name-asc') return a.name.localeCompare(b.name);
-        if (currentSort === 'name-desc') return b.name.localeCompare(a.name);
-        if (currentSort === 'age-asc') return Number(a.age) - Number(b.age);
-        if (currentSort === 'age-desc') return Number(b.age) - Number(a.age);
-        if (currentSort === 'gender') return a.gender.localeCompare(b.gender);
-        return 0;
-    });
-
-    currentFilteredTickets = displayTickets;
-
-    if(displayTickets.length === 0) {
-        bookedTicketsTable.innerHTML = '<tr><td colspan="8" style="text-align:center; padding: 30px; color: #666;">No matching guests found.</td></tr>';
-        return;
-    }
-
-    const checkboxDisplayStyle = isSelectionMode ? 'table-cell' : 'none';
-
-    displayTickets.forEach((ticket, index) => {
-        const tr = document.createElement('tr');
-        tr.dataset.id = ticket.id;
-        
-        let statusHtml = `<span class="status-badge status-${ticket.status}">${ticket.status.replace('-', ' ')}</span>`;
-        if(ticket.status === 'arrived' && ticket.scannedAt) {
-            const dateObj = new Date(ticket.scannedAt);
-            const day = String(dateObj.getDate()).padStart(2, '0');
-            const month = dateObj.toLocaleString('en-US', { month: 'short' }).toUpperCase();
-            const year = dateObj.getFullYear();
-            const dateStr = `${day}/${month}/${year}`;
-            const timeStr = dateObj.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: true });
-
-            statusHtml += `<div style="font-size: 0.75rem; color: #888; margin-top: 3px; white-space: nowrap;">On - ${dateStr}</div>`;
-            statusHtml += `<div style="font-size: 0.75rem; color: #888; white-space: nowrap;">At - ${timeStr}</div>`;
-        }
-
-        const isChecked = selectedTicketIds.has(ticket.id) ? 'checked' : '';
-
-        tr.innerHTML = `
-            <td style="display: ${checkboxDisplayStyle};"><input type="checkbox" class="ticket-checkbox" style="transform: scale(1.2);" ${isChecked}></td>
-            <td style="text-align: center; color: var(--accent-secondary); font-weight: bold;">${index + 1}</td>
-            <td style="font-weight: 500; color: white;">${ticket.name}</td>
-            <td>
-                <div style="display: flex; align-items: center; gap: 8px; white-space: nowrap;">
-                    <span>${ticket.age}</span>
-                    <span style="color: #444;">|</span>
-                    <span>${ticket.gender}</span>
-                </div>
-            </td>
-            <td>${ticket.phone}</td>
-            <td style="font-family: monospace; font-size: 0.8rem; color: #888;">${ticket.id.substring(0, 8)}...</td>
-            <td>${statusHtml}</td>
-            <td><button class="action-btn-small view-ticket-btn" data-id="${ticket.id}">View</button></td>
-        `;
-        bookedTicketsTable.appendChild(tr);
-    });
-
-    document.querySelectorAll('.view-ticket-btn').forEach(btn => {
-        btn.addEventListener('click', (e) => {
-            const ticket = bookedTickets.find(t => t.id === e.target.dataset.id);
-            if(ticket) {
-                document.getElementById('modalTicketName').textContent = ticket.name;
-                document.getElementById('modalTicketAgeGender').textContent = `${ticket.age} / ${ticket.gender}`;
-                document.getElementById('modalTicketPhone').textContent = ticket.phone;
-                document.getElementById('modalTicketSerial').textContent = `ID: ${ticket.id}`;
+            setTimeout(() => {
+                const phone = document.getElementById('modalTicketPhone').textContent.replace(/\D/g, '');
+                const name = document.getElementById('modalTicketName').textContent;
+                const message = encodeURIComponent(`Hello ${name}, here is your Entry Pass 🎫.\n*Keep this QR code ready at the entrance.*`);
+                window.location.href = `https://wa.me/${phone}?text=${message}`;
                 
-                const modalQrcodeContainer = document.getElementById('modalQrcode');
-                modalQrcodeContainer.innerHTML = '';
-                new QRCode(modalQrcodeContainer, {
-                    text: ticket.id,
-                    width: 100,
-                    height: 100,
-                    colorDark : "#000000",
-                    colorLight : "#ffffff",
-                    correctLevel: QRCode.CorrectLevel.H
-                });
+                btn.innerHTML = originalContent;
+                btn.disabled = false;
+            }, 1500);
 
-                ticketViewModal.style.display = 'flex';
-            }
-        });
-    });
-
-    document.querySelectorAll('.ticket-checkbox').forEach(box => {
-        box.addEventListener('change', (e) => {
-            const rowId = e.target.closest('tr').dataset.id;
-            if(e.target.checked) {
-                selectedTicketIds.add(rowId);
-            } else {
-                selectedTicketIds.delete(rowId);
-            }
-            updateSelectionCount();
-        });
-    });
-}
-
-// Modal WhatsApp Share
-modalWhatsAppBtn.addEventListener('click', () => {
-    const btn = modalWhatsAppBtn;
-    const originalContent = btn.innerHTML;
-    btn.textContent = "Processing...";
-    btn.disabled = true;
-
-    const ticketTemplate = document.getElementById('modalTicketTemplate');
-    const originalBorder = ticketTemplate.style.border;
-    ticketTemplate.style.border = 'none';
-
-    html2canvas(ticketTemplate, {
-        scale: 3,
-        backgroundColor: null, 
-        useCORS: true
-    }).then(canvas => {
-        ticketTemplate.style.border = originalBorder;
-        
-        const now = new Date();
-        const pad = (num) => String(num).padStart(2, '0');
-        const timestamp = `${pad(now.getDate())}${pad(now.getMonth() + 1)}${now.getFullYear()}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        
-        const link = document.createElement('a');
-        link.download = `ticket-${timestamp}.png`;
-        link.href = canvas.toDataURL('image/png');
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-
-        setTimeout(() => {
-            const phone = document.getElementById('modalTicketPhone').textContent.replace(/\D/g,'');
-            const name = document.getElementById('modalTicketName').textContent;
-            const message = encodeURIComponent(`Hello ${name}, here is your Entry Pass 🎫.\n*Keep this QR code ready at the entrance.*`);
-            window.location.href = `https://wa.me/${phone}?text=${message}`;
-            
+        }).catch(err => {
+            console.error(err);
+            alert("Error generating ticket image");
             btn.innerHTML = originalContent;
             btn.disabled = false;
-        }, 1500);
-
-    }).catch(err => {
-        console.error(err);
-        alert("Error generating ticket image");
-        btn.innerHTML = originalContent;
-        btn.disabled = false;
+        });
     });
-});
-
-closeTicketModal.addEventListener('click', () => {
-    ticketViewModal.style.display = 'none';
-});
-
-
-function updateTicketPreview(ticket) {
-    document.getElementById('ticketName').textContent = ticket.name;
-    document.getElementById('ticketAgeGender').textContent = `${ticket.age} / ${ticket.gender}`;
-    document.getElementById('ticketPhone').textContent = ticket.phone;
-    document.getElementById('ticketSerial').textContent = `ID: ${ticket.id}`;
-    const qrcodeContainer = document.getElementById('qrcode');
-    qrcodeContainer.innerHTML = '';
-    new QRCode(qrcodeContainer, {
-        text: ticket.id,
-        width: 100,
-        height: 100,
-        colorDark : "#000000",
-        colorLight : "#ffffff",
-        correctLevel: QRCode.CorrectLevel.H
-    });
-    document.getElementById('whatsappBtn').disabled = false;
 }
 
-document.getElementById('whatsappBtn').addEventListener('click', () => {
-    const btn = document.getElementById('whatsappBtn');
-    const originalText = btn.textContent;
-    btn.textContent = "Processing...";
-    btn.disabled = true;
-
-    const ticketTemplate = document.getElementById('ticketTemplate');
-    const originalBorder = ticketTemplate.style.border;
-    ticketTemplate.style.border = 'none';
-
-    html2canvas(ticketTemplate, {
-        scale: 3,
-        backgroundColor: null, 
-        useCORS: true
-    }).then(canvas => {
-        ticketTemplate.style.border = originalBorder;
-
-        const now = new Date();
-        const pad = (num) => String(num).padStart(2, '0');
-        const timestamp = `${pad(now.getDate())}${pad(now.getMonth() + 1)}${now.getFullYear()}${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}`;
-        
-        const link = document.createElement('a');
-        link.download = `ticket-${timestamp}.png`;
-        link.href = canvas.toDataURL('image/png');
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-
-        setTimeout(() => {
-            const phone = document.getElementById('ticketPhone').textContent.replace(/\D/g,'');
-            const name = document.getElementById('ticketName').textContent;
-            const message = encodeURIComponent(`Hello ${name}, here is your Entry Pass 🎫.\n*Keep this QR code ready at the entrance.*`);
-            window.location.href = `https://wa.me/${phone}?text=${message}`;
-            btn.textContent = originalText;
-            btn.disabled = true;
-            document.getElementById('ticketName').textContent = '--';
-            document.getElementById('ticketAgeGender').textContent = '-- / --';
-            document.getElementById('ticketPhone').textContent = '--';
-            document.getElementById('ticketSerial').textContent = 'ID: --';
-            document.getElementById('qrcode').innerHTML = '';
-            document.getElementById('ticketForm').reset();
-        }, 1500);
-
-    }).catch(err => {
-        console.error(err);
-        alert("Error generating ticket image");
-        btn.textContent = originalText;
-        btn.disabled = false;
+if (closeTicketModal) {
+    closeTicketModal.addEventListener('click', () => {
+        if (ticketViewModal) ticketViewModal.style.display = 'none';
     });
-});
-
-const selectBtn = document.getElementById('selectBtn');
-const deleteBtn = document.getElementById('deleteBtn');
-const selectAllCheckbox = document.getElementById('selectAllCheckbox');
-const selectAllContainer = document.querySelector('.select-all-container');
-const selectionCountSpan = document.getElementById('selectionCount');
-let isSelectionMode = false;
-
-function updateSelectionCount() {
-    const count = selectedTicketIds.size;
-    selectionCountSpan.textContent = `(${count} selected)`;
-    exportTriggerBtn.disabled = count === 0;
-    const allVisibleSelected = currentFilteredTickets.length > 0 && 
-                               currentFilteredTickets.every(t => selectedTicketIds.has(t.id));
-    if(currentFilteredTickets.length === 0) selectAllCheckbox.checked = false;
-    else selectAllCheckbox.checked = allVisibleSelected;
 }
 
-selectBtn.addEventListener('click', () => {
-    isSelectionMode = !isSelectionMode;
-    deleteBtn.style.display = isSelectionMode ? 'inline-block' : 'none';
-    selectAllContainer.style.display = isSelectionMode ? 'flex' : 'none'; 
-    selectBtn.textContent = isSelectionMode ? 'Cancel' : 'Select';
-    if(!isSelectionMode) {
-        selectedTicketIds.clear(); 
-        selectAllCheckbox.checked = false;
-        updateSelectionCount();
-    } else {
-        exportTriggerBtn.disabled = true;
-    }
-    // RE-RENDER TO SHOW/HIDE COLUMNS
-    renderBookedTickets(); 
-});
-
-selectAllCheckbox.addEventListener('change', (e) => {
-    const isChecked = e.target.checked;
-    currentFilteredTickets.forEach(t => {
-        if(isChecked) selectedTicketIds.add(t.id);
-        else selectedTicketIds.delete(t.id);
-    });
-    renderBookedTickets();
-    updateSelectionCount();
-});
-
-deleteBtn.addEventListener('click', () => {
-    const selectedIds = Array.from(selectedTicketIds);
-    if(selectedIds.length === 0) return alert('Select tickets to delete');
-    pendingDeleteIds = selectedIds;
-    deleteCountSpan.textContent = selectedIds.length;
-    confirmModal.style.display = 'flex';
-});
-
-cancelDeleteBtn.addEventListener('click', () => {
-    confirmModal.style.display = 'none';
-    pendingDeleteIds = [];
-});
-
-confirmDeleteBtn.addEventListener('click', async () => {
-    if(pendingDeleteIds.length > 0) {
-        confirmDeleteBtn.textContent = "Deleting...";
-        for(const id of pendingDeleteIds) {
-            await deleteDoc(doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets', id));
-        }
-        confirmModal.style.display = 'none';
-        confirmDeleteBtn.textContent = "Delete";
-        pendingDeleteIds = [];
-        selectedTicketIds.clear(); 
-        selectBtn.click(); 
-    }
-});
+// ==========================================
+// SCANNER FUNCTIONALITY
+// ==========================================
 
 const startScanBtn = document.getElementById('startScanBtn');
 const scannerVideo = document.getElementById('scanner-video');
 const scanResult = document.getElementById('scanResult');
 
-startScanBtn.addEventListener('click', () => {
-    if (scannerVideo.srcObject) stopScan();
-    else startScan();
-});
+if (startScanBtn) {
+    startScanBtn.addEventListener('click', () => {
+        // Security check for locked tab
+        if (localLockState.isLocked && localLockState.lockedTabs.includes('scanner')) {
+            showToast("Access Denied", "Scanner tab is locked on this device.");
+            return;
+        }
+        
+        if (scannerVideo && scannerVideo.srcObject) stopScan();
+        else startScan();
+    });
+}
 
 function startScan() {
     navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } })
         .then(stream => {
-            scannerVideo.srcObject = stream;
-            scannerVideo.setAttribute("playsinline", true); 
-            scannerVideo.play();
-            startScanBtn.textContent = 'Deactivate Camera';
-            scanResult.style.display = 'block';
-            scanResult.style.background = 'rgba(255,255,255,0.1)';
-            scanResult.style.color = 'white';
-            scanResult.textContent = 'Searching for QR Code...';
+            if (scannerVideo) {
+                scannerVideo.srcObject = stream;
+                scannerVideo.setAttribute("playsinline", true);
+                scannerVideo.play();
+            }
+            if (startScanBtn) startScanBtn.textContent = 'Deactivate Camera';
+            if (scanResult) {
+                scanResult.style.display = 'block';
+                scanResult.style.background = 'rgba(255,255,255,0.1)';
+                scanResult.style.color = 'white';
+                scanResult.textContent = 'Searching for QR Code...';
+            }
             requestAnimationFrame(tick);
         }).catch(err => {
             alert("Camera error: " + err);
@@ -1179,24 +1663,26 @@ function startScan() {
 }
 
 function stopScan() {
-    if (scannerVideo.srcObject) scannerVideo.srcObject.getTracks().forEach(t => t.stop());
-    scannerVideo.srcObject = null;
-    startScanBtn.textContent = 'Activate Camera';
+    if (scannerVideo && scannerVideo.srcObject) {
+        scannerVideo.srcObject.getTracks().forEach(t => t.stop());
+        scannerVideo.srcObject = null;
+    }
+    if (startScanBtn) startScanBtn.textContent = 'Activate Camera';
 }
 
-let isCooldown = false; 
+let isCooldown = false;
 
 function tick() {
-    if (!scannerVideo.srcObject) return;
+    if (!scannerVideo || !scannerVideo.srcObject) return;
     if (scannerVideo.readyState === scannerVideo.HAVE_ENOUGH_DATA) {
         const canvas = document.createElement('canvas');
         const ctx = canvas.getContext('2d');
         canvas.width = scannerVideo.videoWidth;
         canvas.height = scannerVideo.videoHeight;
         ctx.drawImage(scannerVideo, 0, 0, canvas.width, canvas.height);
-        const imageData = ctx.getImageData(0,0, canvas.width, canvas.height);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
         const code = jsQR(imageData.data, imageData.width, imageData.height, { inversionAttempts: "dontInvert" });
-        if(code && !isCooldown) {
+        if (code && !isCooldown) {
             isCooldown = true;
             validateTicket(code.data);
             setTimeout(() => {
@@ -1204,38 +1690,40 @@ function tick() {
             }, 1500);
         }
     }
-    if (scannerVideo.srcObject) {
+    if (scannerVideo && scannerVideo.srcObject) {
         requestAnimationFrame(tick);
     }
 }
 
 async function validateTicket(ticketId) {
     const ticket = bookedTickets.find(t => t.id === ticketId);
-    scanResult.style.display = 'block';
-    if(ticket) {
-        if(ticket.status === 'coming-soon' && !ticket.scanned) {
-            await updateDoc(doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets', ticketId), {
-                status: 'arrived',
-                scanned: true,
-                scannedAt: Date.now()
-            });
-            scanResult.style.background = 'rgba(16, 185, 129, 0.2)';
-            scanResult.style.color = '#10b981';
-            scanResult.style.border = '1px solid #10b981';
-            scanResult.textContent = `✅ ACCESS GRANTED: ${ticket.name}`;
-            playBeep();
+    if (scanResult) {
+        scanResult.style.display = 'block';
+        if (ticket) {
+            if (ticket.status === 'coming-soon' && !ticket.scanned) {
+                await updateDoc(doc(db, APP_COLLECTION_ROOT, currentUser.uid, 'tickets', ticketId), {
+                    status: 'arrived',
+                    scanned: true,
+                    scannedAt: Date.now()
+                });
+                scanResult.style.background = 'rgba(16, 185, 129, 0.2)';
+                scanResult.style.color = '#10b981';
+                scanResult.style.border = '1px solid #10b981';
+                scanResult.textContent = `✅ ACCESS GRANTED: ${ticket.name}`;
+                playBeep();
+            } else {
+                scanResult.style.background = 'rgba(239, 68, 68, 0.2)';
+                scanResult.style.color = '#ef4444';
+                scanResult.style.border = '1px solid #ef4444';
+                scanResult.textContent = `❌ DENIED: Already Scanned or Invalid Status`;
+                playError();
+            }
         } else {
             scanResult.style.background = 'rgba(239, 68, 68, 0.2)';
             scanResult.style.color = '#ef4444';
-            scanResult.style.border = '1px solid #ef4444';
-            scanResult.textContent = `❌ DENIED: Already Scanned or Invalid Status`;
+            scanResult.textContent = `❌ DENIED: Invalid Ticket ID`;
             playError();
         }
-    } else {
-        scanResult.style.background = 'rgba(239, 68, 68, 0.2)';
-        scanResult.style.color = '#ef4444';
-        scanResult.textContent = `❌ DENIED: Invalid Ticket ID`;
-        playError();
     }
 }
 
@@ -1264,53 +1752,71 @@ function playError() {
     });
 }
 
-if ("serviceWorker" in navigator) {
-    window.addEventListener("load", () => {
-        navigator.serviceWorker.register("/service-worker.js").catch(err => console.log("SW failed:", err));
-    });
-}
+// ==========================================
+// SIDE CONTACT TRAY
+// ==========================================
 
-// --- SIDE CONTACT TRAY LOGIC ---
 const contactTray = document.getElementById('contactTray');
 const trayToggle = document.getElementById('trayToggle');
 const trayIcon = document.getElementById('trayIcon');
 
 if (trayToggle && contactTray) {
     trayToggle.addEventListener('click', (e) => {
-        e.stopPropagation(); // Prevent closing immediately if we add document click listener
+        e.stopPropagation();
         contactTray.classList.toggle('open');
         
-        // Toggle Icon
         if (contactTray.classList.contains('open')) {
-            trayIcon.classList.remove('fa-chevron-left');
-            trayIcon.classList.add('fa-chevron-right');
+            if (trayIcon) {
+                trayIcon.classList.remove('fa-chevron-left');
+                trayIcon.classList.add('fa-chevron-right');
+            }
             
             // Add Blur Effect to content
-            document.getElementById('appContent').classList.add('content-blur');
-            document.getElementById('star-container').classList.add('content-blur');
+            if (appContent) appContent.classList.add('content-blur');
+            const starContainer = document.getElementById('star-container');
+            if (starContainer) starContainer.classList.add('content-blur');
         } else {
-            trayIcon.classList.remove('fa-chevron-right');
-            trayIcon.classList.add('fa-chevron-left');
+            if (trayIcon) {
+                trayIcon.classList.remove('fa-chevron-right');
+                trayIcon.classList.add('fa-chevron-left');
+            }
             
             // Remove Blur Effect
-            document.getElementById('appContent').classList.remove('content-blur');
-            document.getElementById('star-container').classList.remove('content-blur');
+            if (appContent) appContent.classList.remove('content-blur');
+            const starContainer = document.getElementById('star-container');
+            if (starContainer) starContainer.classList.remove('content-blur');
         }
     });
 
     // Close tray when clicking outside
     document.addEventListener('click', (e) => {
-        if (contactTray.classList.contains('open') && 
+        if (contactTray && contactTray.classList.contains('open') && 
             !contactTray.contains(e.target) && 
             !trayToggle.contains(e.target)) {
             
             contactTray.classList.remove('open');
-            trayIcon.classList.remove('fa-chevron-right');
-            trayIcon.classList.add('fa-chevron-left');
+            if (trayIcon) {
+                trayIcon.classList.remove('fa-chevron-right');
+                trayIcon.classList.add('fa-chevron-left');
+            }
             
             // Remove Blur Effect
-            document.getElementById('appContent').classList.remove('content-blur');
-            document.getElementById('star-container').classList.remove('content-blur');
+            if (appContent) appContent.classList.remove('content-blur');
+            const starContainer = document.getElementById('star-container');
+            if (starContainer) starContainer.classList.remove('content-blur');
         }
     });
 }
+
+// ==========================================
+// SERVICE WORKER
+// ==========================================
+
+if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+        navigator.serviceWorker.register("/service-worker.js").catch(err => console.log("SW failed:", err));
+    });
+}
+
+// Initial update
+updateOnlineStatus();
