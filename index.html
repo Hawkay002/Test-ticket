@@ -56,16 +56,15 @@
         </div>
     </div>
 
-    <!-- Unlock Modal -->
-    <div id="unlock-modal" class="modal-overlay">
+    <!-- Admin Lock Confirmation Modal (NEW) -->
+    <div id="admin-lock-modal" class="modal-overlay">
         <div class="modal-box">
-            <h3>Device Locked</h3>
-            <p>Enter the master password to unlock this device.</p>
-            <input type="password" id="unlockPasswordInput" class="premium-input" placeholder="Enter Password" style="text-align: center; letter-spacing: 2px;">
-            <div id="unlock-error" style="color: #ef4444; font-size: 0.85rem; margin-bottom: 15px; display: none;">Incorrect Password</div>
+            <h3>Secure Remote User</h3>
+            <p>You are about to lock tabs for <span id="lock-target-email" style="color: var(--accent-secondary);">--</span>.</p>
+            <input type="password" id="adminLockPassword" class="premium-input" placeholder="Confirm Admin Password" style="text-align: center;">
             <div class="modal-actions">
-                <button id="cancelUnlock" class="modal-btn secondary">Cancel</button>
-                <button id="confirmUnlock" class="modal-btn success">Unlock</button>
+                <button id="cancelAdminLock" class="modal-btn secondary">Cancel</button>
+                <button id="confirmAdminLock" class="modal-btn success">Sync & Lock</button>
             </div>
         </div>
     </div>
@@ -320,11 +319,11 @@
                             <thead>
                                 <tr>
                                     <th></th>
-                                    <th style="width: 50px; text-align: center;">#</th>
-                                    <th class="guest-name-col">Guest Name</th>
+                                    <th style="width: 50px; text-align: center;">#</th> <!-- New Serial Column -->
+                                    <th class="guest-name-col">Guest Name</th> <!-- UPDATED CLASS AND TEXT HERE -->
                                     <th>Details</th>
                                     <th>Contact</th>
-                                    <th>Ticket ID</th>
+                                    <th>Ticket ID</th> <!-- Renamed -->
                                     <th>Status</th>
                                     <th></th>
                                 </tr>
@@ -344,6 +343,7 @@
                         <video id="scanner-video" playsinline></video>
                         <div class="scanner-overlay"></div>
                     </div>
+                    <!-- CHANGED: Added margin: 10px auto to center the flex button -->
                     <button id="startScanBtn" class="premium-btn" style="width: auto; padding: 12px 30px; margin: 10px auto;">Activate Camera</button>
                     <div id="scanResult" style="margin-top: 20px; padding: 15px; border-radius: 12px; display: none;"></div>
                 </div>
@@ -372,95 +372,55 @@
                         <p style="font-size: 0.9rem; color: #888;"><strong>Time:</strong> <span id="currentDeadline" style="color: white;">--</span></p>
                     </div>
 
-                    <!-- NEW ADMIN DEVICE MANAGEMENT PANEL -->
-                    <div id="adminPanel" style="margin-top: 40px; display: none;">
+                    <!-- ADMIN PANEL: Only visible to admin.test@gmail.com -->
+                    <div id="admin-lock-panel" style="display: none; margin-top: 40px; border-top: 1px solid var(--border-subtle); padding-top: 30px;">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px;">
-                            <h3 style="font-size: 1.2rem; color: white; border-bottom: 1px solid var(--border-subtle); padding-bottom: 10px;">
-                                <i class="fa-solid fa-users-gear"></i> Device Management
-                            </h3>
-                            <button id="refreshDevicesBtn" class="action-btn-small" style="display: flex; align-items: center; gap: 6px; font-size: 0.8rem;">
-                                <i class="fa-solid fa-arrows-rotate"></i> Refresh
-                            </button>
+                            <h3 style="font-size: 1.2rem; color: white; margin: 0;">Remote Device Management</h3>
+                            <span class="status-badge status-arrived" style="font-size: 0.7rem;">Admin Access</span>
                         </div>
-                        
-                        <div id="connectedDevicesList" style="margin-bottom: 20px; max-height: 300px; overflow-y: auto; background: rgba(0,0,0,0.3); border-radius: 12px; padding: 15px;">
-                            <div style="text-align: center; color: #666; padding: 20px;">
-                                <i class="fa-solid fa-spinner fa-spin"></i> Loading connected devices...
-                            </div>
-                        </div>
-                        
-                        <!-- Admin Lock Control Form -->
-                        <div id="adminLockControls" style="background: rgba(30, 30, 30, 0.8); border-radius: 16px; padding: 20px; border: 1px solid var(--border-subtle); display: none;">
-                            <h4 style="margin-bottom: 15px; color: white;">Lock Control for: <span id="targetUserEmail" style="color: var(--accent-secondary);"></span></h4>
-                            
-                            <div style="margin-bottom: 15px;">
-                                <label style="display: block; font-size: 0.8rem; color: #888; margin-bottom: 5px;">Tabs to Lock</label>
-                                <div style="display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 15px;">
-                                    <label class="checkbox-label">
-                                        <input type="checkbox" class="admin-lock-checkbox" value="create"> Issue Ticket
-                                    </label>
-                                    <label class="checkbox-label">
-                                        <input type="checkbox" class="admin-lock-checkbox" value="booked"> Guest List
-                                    </label>
-                                    <label class="checkbox-label">
-                                        <input type="checkbox" class="admin-lock-checkbox" value="scanner"> Scanner
-                                    </label>
-                                </div>
-                            </div>
-                            
-                            <div class="password-wrapper" style="margin-bottom: 20px;">
-                                <input type="password" id="adminLockPassword" class="premium-input" placeholder="Lock Password (Required)">
-                                <i class="fa-regular fa-eye password-toggle-icon" id="toggleAdminPassword"></i>
-                            </div>
-                            
-                            <div style="display: flex; gap: 10px;">
-                                <button id="cancelAdminLock" class="modal-btn secondary" style="flex: 1;">Cancel</button>
-                                <button id="applyAdminLock" class="modal-btn danger" style="flex: 1;">
-                                    <i class="fa-solid fa-lock"></i> Apply Lock
-                                </button>
-                            </div>
-                        </div>
-                        
-                        <!-- Admin Status Info -->
-                        <div style="background: rgba(59, 130, 246, 0.1); border: 1px solid rgba(59, 130, 246, 0.3); border-radius: 12px; padding: 15px; margin-top: 20px;">
-                            <div style="display: flex; align-items: center; gap: 10px; margin-bottom: 10px;">
-                                <i class="fa-solid fa-circle-info" style="color: var(--accent-secondary);"></i>
-                                <span style="font-size: 0.9rem; color: white;">Admin Controls Active</span>
-                            </div>
-                            <p style="font-size: 0.8rem; color: #aaa; line-height: 1.4;">
-                                As an administrator, you can remotely lock tabs on other devices. Changes apply in real-time.
-                            </p>
-                        </div>
-                    </div>
-
-                    <!-- SECURITY SECTION -->
-                    <div class="lock-section" style="margin-top: 40px; border-top: 1px solid var(--border-subtle); padding-top: 30px;">
-                        <h3 style="font-size: 1.2rem; margin-bottom: 15px; color: white;">Lock Tabs</h3>
                         <p style="color: #888; font-size: 0.9rem; margin-bottom: 20px;">
-                            Secure this device. The password is global for all devices.
+                            Monitor active sessions and lock specific tabs for staff members. 
                         </p>
                         
-                        <div class="password-wrapper" style="margin-bottom: 20px;">
-                             <input type="password" id="lockSettingPassword" class="premium-input" placeholder="Password">
-                             <i class="fa-regular fa-eye password-toggle-icon" id="toggleLockPassword"></i>
+                        <!-- List of Managed Users -->
+                        <div id="managed-users-list" class="managed-users-grid">
+                            <!-- Populated by JS -->
+                            <div style="padding: 20px; text-align: center; color: #666;">Loading staff status...</div>
                         </div>
 
-                        <div style="margin-bottom: 20px; display: flex; flex-direction: column; gap: 10px;">
-                            <label class="checkbox-label">
-                                <input type="checkbox" class="lock-checkbox" value="create"> Issue Ticket Tab
-                            </label>
-                            <label class="checkbox-label">
-                                <input type="checkbox" class="lock-checkbox" value="booked"> Guest List Tab
-                            </label>
-                            <label class="checkbox-label">
-                                <input type="checkbox" class="lock-checkbox" value="scanner"> Scanner Tab
-                            </label>
-                        </div>
+                        <!-- Configuration Area for Selected User -->
+                        <div id="user-lock-config-area" style="display: none; background: rgba(255,255,255,0.05); padding: 20px; border-radius: 16px; margin-top: 20px; border: 1px solid var(--border-subtle);">
+                            <h4 style="color: white; margin-bottom: 15px; display: flex; align-items: center; gap: 10px;">
+                                <i class="fa-solid fa-user-lock"></i> 
+                                Configuring: <span id="selected-user-email" style="color: var(--accent-secondary);">--</span>
+                            </h4>
+                            
+                            <div style="margin-bottom: 20px; display: flex; flex-direction: column; gap: 10px;">
+                                <label class="checkbox-label">
+                                    <input type="checkbox" class="remote-lock-checkbox" value="create"> Issue Ticket Tab
+                                </label>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" class="remote-lock-checkbox" value="booked"> Guest List Tab
+                                </label>
+                                <label class="checkbox-label">
+                                    <input type="checkbox" class="remote-lock-checkbox" value="scanner"> Scanner Tab
+                                </label>
+                            </div>
 
-                        <button id="lockSystemBtn" class="premium-btn" style="background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
-                            <i class="fa-solid fa-lock"></i> Lock Tabs
-                        </button>
+                            <button id="triggerLockModalBtn" class="premium-btn" style="background: rgba(239, 68, 68, 0.2); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3);">
+                                <i class="fa-solid fa-tower-broadcast"></i> Sync Settings to Devices
+                            </button>
+                        </div>
                     </div>
+
+                    <!-- Non-Admin Message -->
+                    <div id="user-lock-status" style="display: none; margin-top: 40px; border-top: 1px solid var(--border-subtle); padding-top: 30px; text-align: center;">
+                        <h3 style="font-size: 1.1rem; color: #666; margin-bottom: 10px;">System Status</h3>
+                        <p style="color: #444; font-size: 0.9rem;">
+                            <i class="fa-solid fa-shield-halved"></i> Access controls are managed centrally by the Administrator.
+                        </p>
+                    </div>
+
                 </div>
             </div>
         </main>
@@ -477,12 +437,13 @@
         <div class="tray-content">
             <h2 class="tray-heading">Quick Help Tray</h2>
             
-            <!-- 1. Admin/Dev -->
+            <!-- 1. Admin/Dev (Standard Tooltip Now) -->
             <div class="contact-section">
                 <div class="section-header-wrapper">
                     <h3>Admin/Developer</h3>
                     <div class="info-icon-wrapper">
                         <i class="fa-solid fa-circle-info"></i>
+                        <!-- Removed 'bottom' class -->
                         <div class="info-tooltip">For system errors, bugs, or technical app support.</div>
                     </div>
                 </div>
@@ -495,7 +456,7 @@
                 </div>
             </div>
             
-            <!-- 2. Event Manager -->
+            <!-- 2. Event Manager (Standard Tooltip) -->
             <div class="contact-section">
                 <div class="section-header-wrapper">
                     <h3>Event Manager</h3>
@@ -605,7 +566,7 @@
         </div>
     </div>
 
-    <!-- Main Script File -->
+    <!-- Main Script File (Type=Module is essential for Firebase imports) -->
     <script type="module" src="script.js"></script>
 </body>
 </html>
